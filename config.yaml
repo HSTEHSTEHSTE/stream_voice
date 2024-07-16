@@ -11,4 +11,16 @@ exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
 exp_name: base
 
 device: cuda
-max_seq_len: 3000
+max_seq_len: 2048
+batch_size: 32
+
+model:
+  code_dim: 64
+  codebook_num: 8
+  n_layers: 8
+  n_heads: 4
+  emb_dim: 384
+  transformer_dim: 512
+  norm_eps: 1.0e-5
+  rope_theta: 500000
+  multiple_of: 256

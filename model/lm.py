@@ -11,25 +11,13 @@ import torch.nn.functional as F
 from fairscale.nn.model_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
-    VocabParallelEmbedding,
 )
 from torch import nn
 
 
 @dataclass
 class ModelArgs:
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
-    n_kv_heads: Optional[int] = None
-    vocab_size: int = -1
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    ffn_dim_multiplier: Optional[float] = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 500000
-
     max_batch_size: int = 32
-    max_seq_len: int = 2048
 
 
 class RMSNorm(torch.nn.Module):
@@ -88,39 +76,39 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, configs):
         super().__init__()
-        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        model_parallel_size = fs_init.get_model_parallel_world_size()
-        self.n_local_heads = args.n_heads // model_parallel_size
+        self.n_kv_heads = configs['model']['n_heads']
+        model_parallel_size = fs_init.get_model_parallel_world_size() # todo: verify
+        self.n_local_heads = configs['model']['n_heads'] // model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
-        self.head_dim = args.dim // args.n_heads
+        self.head_dim = configs['model']['transformer_dim'] // configs['model']['n_heads']
 
         self.wq = ColumnParallelLinear(
-            args.dim,
-            args.n_heads * self.head_dim,
+            in_features = configs['model']['transformer_dim'],
+            out_features = configs['model']['n_heads'] * self.head_dim,
             bias=False,
             gather_output=False,
             init_method=lambda x: x,
         )
         self.wk = ColumnParallelLinear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
+            in_features = configs['model']['transformer_dim'],
+            out_features = self.n_kv_heads * self.head_dim,
             bias=False,
             gather_output=False,
             init_method=lambda x: x,
         )
         self.wv = ColumnParallelLinear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
+            in_features = configs['model']['transformer_dim'],
+            out_features = self.n_kv_heads * self.head_dim,
             bias=False,
             gather_output=False,
             init_method=lambda x: x,
         )
         self.wo = RowParallelLinear(
-            args.n_heads * self.head_dim,
-            args.dim,
+            in_features = configs['model']['n_heads'] * self.head_dim,
+            out_features = configs['model']['transformer_dim'],
             bias=False,
             input_is_parallel=True,
             init_method=lambda x: x,
@@ -128,16 +116,16 @@ class Attention(nn.Module):
 
         self.cache_k = torch.zeros(
             (
-                args.max_batch_size,
-                args.max_seq_len,
+                configs['batch_size'],
+                configs['max_seq_len'],
                 self.n_local_kv_heads,
                 self.head_dim,
             )
         ).cuda()
         self.cache_v = torch.zeros(
             (
-                args.max_batch_size,
-                args.max_seq_len,
+                configs['batch_size'],
+                configs['max_seq_len'],
                 self.n_local_kv_heads,
                 self.head_dim,
             )
@@ -220,21 +208,27 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(self, layer_id: int, configs):
         super().__init__()
-        self.n_heads = args.n_heads
-        self.dim = args.dim
-        self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        self.n_heads = configs['model']['n_heads']
+        self.dim = configs['model']['transformer_dim']
+        self.head_dim = configs['model']['transformer_dim'] // configs['model']['n_heads']
+        self.attention = Attention(configs)
         self.feed_forward = FeedForward(
-            dim=args.dim,
-            hidden_dim=4 * args.dim,
-            multiple_of=args.multiple_of,
-            ffn_dim_multiplier=args.ffn_dim_multiplier,
+            dim = configs['model']['transformer_dim'],
+            hidden_dim = 4 * configs['model']['transformer_dim'],
+            multiple_of = configs['model']['multiple_of'],
+            ffn_dim_multiplier = None,
         )
         self.layer_id = layer_id
-        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
-        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.attention_norm = RMSNorm(
+            dim = configs['model']['transformer_dim'], 
+            eps = configs['model']['norm_eps']
+        )
+        self.ffn_norm = RMSNorm(
+            dim = configs['model']['transformer_dim'], 
+            eps = configs['model']['norm_eps']
+        )
 
     def forward(
         self,
@@ -248,33 +242,41 @@ class TransformerBlock(nn.Module):
         return out
 
 
-class Transformer(nn.Module):
-    def __init__(self, params: ModelArgs):
+class StreamVoice(nn.Module):
+    def __init__(self, configs):
         super().__init__()
-        self.params = params
-        self.vocab_size = params.vocab_size
-        self.n_layers = params.n_layers
 
-        self.tok_embeddings = VocabParallelEmbedding(
-            params.vocab_size, params.dim, init_method=lambda x: x
+        self.embedding = torch.nn.Linear(
+            in_features = configs['model']['codebook_dim'] * configs['model']['codebook_num'], 
+            out_features = configs['model']['emb_dim']
+        )
+
+        self.projection = torch.nn.Linear(
+            in_features = configs['model']['emb_dim'], 
+            out_features = configs['model']['transformer_dim']
         )
 
         self.layers = torch.nn.ModuleList()
-        for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params))
+        for layer_id in range(configs['model']['n_layers']):
+            self.layers.append(TransformerBlock(layer_id, configs))
 
-        self.norm = RMSNorm(params.dim, eps=params.norm_eps)
+        self.norm = RMSNorm(
+            dim = configs['model']['transformer_dim'], 
+            eps = configs['model']['norm_eps']
+        )
+        
         self.output = ColumnParallelLinear(
-            params.dim, params.vocab_size, bias=False, init_method=lambda x: x
+            in_features = configs['model']['transformer_dim'], 
+            out_features = configs['model']['codebook_dim'] * configs['model']['codebook_num'], 
+            bias = False, init_method = lambda x: x
         )
 
         self.freqs_cis = precompute_freqs_cis(
-            params.dim // params.n_heads,
-            params.max_seq_len * 2,
-            params.rope_theta,
+            dim = configs['model']['transformer_dim'] // configs['model']['n_heads'],
+            end = configs['max_seq_len'] * 2,
+            theta = configs['model']['rope_theta'],
         )
 
-    @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
