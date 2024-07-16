@@ -164,3 +164,4 @@ cython_debug/
 # Experiment and Data folders
 *exp/
 *data/
+*corpora/

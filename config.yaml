@@ -1,0 +1,14 @@
+data:
+  base_path: /home/hltcoe/xli/ARTS/stream_voice/data
+  codec_path: /home/hltcoe/xli/ARTS/stream_voice/data/LibriTTS_audiodec
+  asr_path: /home/hltcoe/xli/ARTS/stream_voice/data/LibriTTS_icefall
+  train_sets: ['train-clean-100', 'train-clean-360', 'train-other-500']
+  dev_sets: ['dev-clean', 'dev-other']
+  test_sets: ['test-clean', 'test-other']
+  debug_threshold: 100
+
+exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
+exp_name: base
+
+device: cuda
+max_seq_len: 3000
