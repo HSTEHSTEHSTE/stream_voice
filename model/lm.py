@@ -8,10 +8,6 @@ from typing import Optional, Tuple
 import fairscale.nn.model_parallel.initialize as fs_init
 import torch
 import torch.nn.functional as F
-from fairscale.nn.model_parallel.layers import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
 from torch import nn
 
 
@@ -79,39 +75,31 @@ class Attention(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.n_kv_heads = configs['model']['n_heads']
-        model_parallel_size = fs_init.get_model_parallel_world_size() # todo: verify
+        model_parallel_size = 1 # todo: verify
         self.n_local_heads = configs['model']['n_heads'] // model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = configs['model']['transformer_dim'] // configs['model']['n_heads']
 
-        self.wq = ColumnParallelLinear(
+        self.wq = torch.nn.Linear(
             in_features = configs['model']['transformer_dim'],
             out_features = configs['model']['n_heads'] * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
+            bias = False,
         )
-        self.wk = ColumnParallelLinear(
+        self.wk = torch.nn.Linear(
             in_features = configs['model']['transformer_dim'],
             out_features = self.n_kv_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
+            bias = False,
         )
-        self.wv = ColumnParallelLinear(
+        self.wv = torch.nn.Linear(
             in_features = configs['model']['transformer_dim'],
             out_features = self.n_kv_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
+            bias = False,
         )
-        self.wo = RowParallelLinear(
+        self.wo = torch.nn.Linear(
             in_features = configs['model']['n_heads'] * self.head_dim,
             out_features = configs['model']['transformer_dim'],
-            bias=False,
-            input_is_parallel=True,
-            init_method=lambda x: x,
+            bias = False,
         )
 
         self.cache_k = torch.zeros(
@@ -193,14 +181,14 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+        self.w1 = torch.nn.Linear(
+            dim, hidden_dim, bias = False,
         )
-        self.w2 = RowParallelLinear(
-            hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
+        self.w2 = torch.nn.Linear(
+            hidden_dim, dim, bias = False,
         )
-        self.w3 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+        self.w3 = torch.nn.Linear(
+            dim, hidden_dim, bias = False,
         )
 
     def forward(self, x):
@@ -246,9 +234,14 @@ class StreamVoice(nn.Module):
     def __init__(self, configs):
         super().__init__()
 
-        self.embedding = torch.nn.Linear(
-            in_features = configs['model']['codebook_dim'] * configs['model']['codebook_num'], 
-            out_features = configs['model']['emb_dim']
+        self.codebook_num = configs['model']['codebook_num']
+        self.codebook_dim = configs['model']['codebook_dim']
+        self.max_seq_len = configs['max_seq_len']
+
+        self.embeddings = torch.nn.Embedding(
+            num_embeddings = self.codebook_num * self.codebook_dim + 1, 
+            embedding_dim = configs['model']['emb_dim'],
+            padding_idx = self.codebook_num * self.codebook_dim
         )
 
         self.projection = torch.nn.Linear(
@@ -265,40 +258,49 @@ class StreamVoice(nn.Module):
             eps = configs['model']['norm_eps']
         )
         
-        self.output = ColumnParallelLinear(
+        self.output = torch.nn.Linear(
             in_features = configs['model']['transformer_dim'], 
-            out_features = configs['model']['codebook_dim'] * configs['model']['codebook_num'], 
-            bias = False, init_method = lambda x: x
+            out_features = self.codebook_dim * self.codebook_num, 
+            bias = False
         )
+
+        self.log_softmax = torch.nn.LogSoftmax(dim = 2)
 
         self.freqs_cis = precompute_freqs_cis(
             dim = configs['model']['transformer_dim'] // configs['model']['n_heads'],
-            end = configs['max_seq_len'] * 2,
+            end = self.max_seq_len * 2,
             theta = configs['model']['rope_theta'],
         )
 
-    def forward(self, tokens: torch.Tensor, start_pos: int):
-        _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
-        self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+    def forward(self, codecs, asr_embs):
+        batch_size = codecs.shape[0]
+        codec_embs = torch.sum(self.embeddings(codecs), dim = 2) # [batch_size, seq_len, transformer_dim]
+        codec_embs = codec_embs.view((codec_embs.shape[0], int(codec_embs.shape[1] / 4), 4, codec_embs.shape[2]))
+        embs = torch.cat([codec_embs, asr_embs.unsqueeze(2)], dim = 2)
+        embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3]))
+        embs = self.projection(embs)
+        seq_len = embs.shape[1]
+        self.freqs_cis = self.freqs_cis.to(embs.device)
+        freqs_cis = self.freqs_cis[:min(seq_len, self.max_seq_len)]
 
         mask = None
-        if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
+        if seq_len > 1:
+            mask = torch.full((seq_len, seq_len), float("-inf"), device = embs.device)
 
-            mask = torch.triu(mask, diagonal=1)
+            mask = torch.triu(mask, diagonal = 1)
 
             # When performing key-value caching, we compute the attention scores
             # only for the new sequence. Thus, the matrix of scores is of size
             # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
             # j > cache_len + i, since row i corresponds to token cache_len + i.
             mask = torch.hstack(
-                [torch.zeros((seqlen, start_pos), device=tokens.device), mask]
-            ).type_as(h)
+                [torch.zeros((seq_len, 0), device = embs.device), mask]
+            ).type_as(embs)
 
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
-        h = self.norm(h)
-        output = self.output(h).float()
+            embs = layer(embs, 0, freqs_cis, mask)
+        embs = self.norm(embs)
+        output = self.output(embs).float() # [batch_size, seq_len, codebook_num * codebook_dim]
+        output = output.view((output.shape[0], output.shape[1], self.codebook_dim, self.codebook_num)) # [batch_size, seq_len, codebook_dim, codebook_num]
+        output = self.log_softmax(output)
         return output

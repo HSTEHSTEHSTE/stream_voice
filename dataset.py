@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-import os
+import os, math
 
 class Dataset(Dataset):
     def __init__(self, configs, sort = True, set_name = None):
@@ -17,6 +17,8 @@ class Dataset(Dataset):
 
         self.codec_path = configs['data']['codec_path']
         self.asr_path = configs['data']['asr_path']
+
+        self.codec_size = configs['model']['codebook_num'] * configs['model']['codebook_dim']
 
         self.items = {}
         self.item_indices = []
@@ -35,8 +37,13 @@ class Dataset(Dataset):
 
     def __getitem__(self, idx):
         item_meta = self.items[self.item_indices[idx]].copy()
-        item_meta['codec'] = torch.load(os.path.join(self.codec_path, item_meta['path'] + '.pt'))
-        item_meta['asr_emb'] = torch.load(os.path.join(self.asr_path, item_meta['path'] + '.pt'))
+        item_meta['codec'] = torch.load(os.path.join(self.codec_path, item_meta['path'] + '.pt'), map_location = 'cpu').detach()
+        item_meta['asr_emb'] = torch.load(os.path.join(self.asr_path, item_meta['path'] + '.pt'), map_location = 'cpu').detach()[:, :-7, :]
+        item_meta['asr_emb'] = torch.nn.functional.interpolate(
+            input = torch.transpose(item_meta['asr_emb'], 1, 2),
+            size = math.ceil(item_meta['codec'].shape[1] / 4)
+        )
+        item_meta['asr_emb'] = torch.transpose(item_meta['asr_emb'], 1, 2)
         return item_meta
 
     def collate_fn(self, batch):
@@ -47,18 +54,26 @@ class Dataset(Dataset):
         asr_emb_lens = []
 
         for index in range(batch_len):
-            codec_pts.append(torch.transpose(batch['index']['codec'], 1, 0)) # [length, 8]
-            codec_lens.append(batch['index']['codec'].shape[1])
-            asr_emb_pts.append(batch['index']['asr_emb'].unsqueeze(0)) # [length, 384]
-            asr_emb_lens.append(batch['index']['asr_emb'].shape[1])
-            codec_pts = torch.nn.utils.rnn.pad_sequence(codec_pts, batch_first = True, padding_value = -1.)
-            asr_emb_pts = torch.nn.utils.rnn.pad_sequence(asr_emb_pts, batch_first = True, padding_value = -1.)
+            codec_pts.append(torch.transpose(batch[index]['codec'], 1, 0)) # [length, 8]
+            codec_lens.append(batch[index]['codec'].shape[1])
+            asr_emb_pts.append(batch[index]['asr_emb'].squeeze(0)) # [length, 384]
+            asr_emb_lens.append(batch[index]['asr_emb'].shape[1])
+        codec_pts = torch.nn.utils.rnn.pad_sequence(
+            sequences = codec_pts,
+            batch_first = True,
+            padding_value = self.codec_size
+        )
+        asr_emb_pts = torch.nn.utils.rnn.pad_sequence(
+            sequences = asr_emb_pts,
+            batch_first = True,
+            padding_value = -1.
+        )
 
         out = {
             "codec_pts": codec_pts,
-            "codec_lens": codec_lens,
+            "codec_lens": torch.tensor(codec_lens),
             "asr_emb_pts": asr_emb_pts,
-            "asr_emb_lens": asr_emb_lens
+            "asr_emb_lens": torch.tensor(asr_emb_lens)
         }
         # todo: test output
         return out
@@ -72,4 +87,4 @@ if __name__ == "__main__":
     dataset = Dataset(configs, set_name = 'dev')
 
     print(len(dataset))
-    dataset.__getitem__(0)
+    dataset.__getitem__(1)
