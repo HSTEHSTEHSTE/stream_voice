@@ -11,7 +11,7 @@ exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
 exp_name: base
 
 device: cuda
-max_seq_len: 2048
+max_seq_len: 1000 # must be multiples of (frame_ratio + 1)
 batch_size: 16
 
 model:
@@ -24,7 +24,16 @@ model:
   norm_eps: 1.0e-5
   rope_theta: 500000
   multiple_of: 256
+  frame_ratio: 4
 
 training:
+  epoch: 100
+  report_every: 10
+  valid_every: 1000
   mask_ratio: 0.02
   num_span: 10
+  grad_clip_thresh: 1.0
+  optim:
+    betas: [0.9, 0.98]
+    eps: 1.0e-9
+    weight_decay: 0.

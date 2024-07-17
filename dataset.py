@@ -19,6 +19,7 @@ class Dataset(Dataset):
         self.asr_path = configs['data']['asr_path']
 
         self.codec_size = configs['model']['codebook_num'] * configs['model']['codebook_dim']
+        self.frame_ratio = configs['model']['frame_ratio']
 
         self.items = {}
         self.item_indices = []
@@ -38,12 +39,12 @@ class Dataset(Dataset):
     def __getitem__(self, idx):
         item_meta = self.items[self.item_indices[idx]].copy()
         item_meta['codec'] = torch.load(os.path.join(self.codec_path, item_meta['path'] + '.pt'), map_location = 'cpu').detach()
-        item_meta['asr_emb'] = torch.load(os.path.join(self.asr_path, item_meta['path'] + '.pt'), map_location = 'cpu').detach()[:, :-7, :]
+        item_meta['asr_emb'] = torch.load(os.path.join(self.asr_path, item_meta['path'] + '.pt'), map_location = 'cpu')[:, :-7, :]
         item_meta['asr_emb'] = torch.nn.functional.interpolate(
             input = torch.transpose(item_meta['asr_emb'], 1, 2),
-            size = math.ceil(item_meta['codec'].shape[1] / 4)
+            size = math.ceil(item_meta['codec'].shape[1] / self.frame_ratio)
         )
-        item_meta['asr_emb'] = torch.transpose(item_meta['asr_emb'], 1, 2)
+        item_meta['asr_emb'] = torch.transpose(item_meta['asr_emb'], 1, 2).detach()
         return item_meta
 
     def collate_fn(self, batch):

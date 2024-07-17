@@ -35,6 +35,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    freqs_cis.requires_grad = False
     return freqs_cis
 
 
@@ -135,14 +136,8 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
-
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+        keys = xk[:bsz, : start_pos + seqlen]
+        values = xv[:bsz, : start_pos + seqlen]
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(
@@ -237,6 +232,7 @@ class StreamVoice(nn.Module):
         self.codebook_num = configs['model']['codebook_num']
         self.codebook_dim = configs['model']['codebook_dim']
         self.max_seq_len = configs['max_seq_len']
+        self.frame_ratio = configs['model']['frame_ratio']
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings = self.codebook_num * self.codebook_dim + 1, 
@@ -264,8 +260,6 @@ class StreamVoice(nn.Module):
             bias = False
         )
 
-        self.log_softmax = torch.nn.LogSoftmax(dim = 2)
-
         self.freqs_cis = precompute_freqs_cis(
             dim = configs['model']['transformer_dim'] // configs['model']['n_heads'],
             end = self.max_seq_len * 2,
@@ -275,10 +269,11 @@ class StreamVoice(nn.Module):
     def forward(self, codecs, asr_embs):
         batch_size = codecs.shape[0]
         codec_embs = torch.sum(self.embeddings(codecs), dim = 2) # [batch_size, seq_len, transformer_dim]
-        codec_embs = codec_embs.view((codec_embs.shape[0], int(codec_embs.shape[1] / 4), 4, codec_embs.shape[2]))
-        embs = torch.cat([codec_embs, asr_embs.unsqueeze(2)], dim = 2)
+        codec_embs = codec_embs.view((codec_embs.shape[0], int(codec_embs.shape[1] / self.frame_ratio), self.frame_ratio, codec_embs.shape[2]))
+        embs = torch.cat([asr_embs.unsqueeze(2), codec_embs], dim = 2)
         embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3]))
         embs = self.projection(embs)
+        embs = embs[:, :self.max_seq_len, :]
         seq_len = embs.shape[1]
         self.freqs_cis = self.freqs_cis.to(embs.device)
         freqs_cis = self.freqs_cis[:min(seq_len, self.max_seq_len)]
@@ -302,5 +297,4 @@ class StreamVoice(nn.Module):
         embs = self.norm(embs)
         output = self.output(embs).float() # [batch_size, seq_len, codebook_num * codebook_dim]
         output = output.view((output.shape[0], output.shape[1], self.codebook_dim, self.codebook_num)) # [batch_size, seq_len, codebook_dim, codebook_num]
-        output = self.log_softmax(output)
         return output
