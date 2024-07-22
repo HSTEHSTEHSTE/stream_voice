@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 from dataset import Dataset
 from model.lm import StreamVoice
+from optimizer import ScheduledOptim
 from tqdm import tqdm
 
 with open('config.yaml') as stream:
@@ -61,8 +62,14 @@ optimizer = torch.optim.Adam(
     model.parameters(), 
     betas = configs['training']['optim']['betas'], 
     eps = configs['training']['optim']['eps'], 
-    weight_decay = configs['training']['optim']['weight_decay'],
-    lr = configs['training']['optim']['lr']
+    weight_decay = configs['training']['optim']['weight_decay']
+)
+scheduled_optimizer = ScheduledOptim(
+    optimizer = optimizer, 
+    d_model = configs['model']['transformer_dim'], 
+    n_warmup_steps = configs['training']['n_warmup_step'], 
+    current_steps = max(configs['training']['restore_step'], 0),
+    init_lr = configs['training']['optim']['init_lr']
 )
 
 current_step = 0
@@ -88,42 +95,37 @@ for epoch_index in range(configs['training']['epoch']):
         in_codec_pts = torch.cat([codec_pts, codec_extra_pad.detach()], dim = 1).detach()
 
         output = model(in_codec_pts, asr_emb_pts) # [batch_size, seq_len, codebook_dim, codebook_num]
-        # print(torch.argmax(output[torch.argmax(batch['codec_lens']), -1, :, :], dim = 0))
-        # # print(torch.argmax(output[0, 2, :, :], dim = 0))
         output = output[:, :-1, :, :]
         output = output.view((output.shape[0], int(output.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, output.shape[2], output.shape[3]))
         output = output[:, :, :-1, :, :]
         output = torch.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3], output.shape[4]))
 
-        loss = None
         codec_pts = codec_pts[:, :int(configs['max_seq_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), :].detach()
-        # print(torch.remainder(codec_pts[torch.argmax(batch['codec_lens']), -1, :], 1024))
-        # # print(torch.remainder(codec_pts[0, 0, :], 1024))
-        # print('**')
+        loss = torch.tensor(0.).to(device)
         for codebook_num in range(configs['model']['codebook_num']):
             codec_pt = codec_pts[:, :, codebook_num] - configs['model']['codebook_dim'] * codebook_num
             mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
             codec_pt = torch.masked_select(codec_pt, mask)
             output_codec = torch.masked_select(output[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
-            if loss is None:
-                loss = cross_entropy_loss(output_codec, codec_pt.detach())
-            else:
-                loss = loss + cross_entropy_loss(output_codec, codec_pt.detach())
-        optimizer.zero_grad()
+            loss = loss + cross_entropy_loss(output_codec, codec_pt.detach())
+        
+        loss = loss / configs['training']['gradient_acc_steps']
         loss.backward()
+        
+        if (current_step + 1) % configs['training']['gradient_acc_steps'] == 0:
+            # Clipping gradients to avoid gradient explosion
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), configs['training']['grad_clip_thresh'])
 
-        # Clipping gradients to avoid gradient explosion
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(), configs['training']['grad_clip_thresh'])
+            scheduled_optimizer.step_and_update_lr()
+            scheduled_optimizer.zero_grad()
 
-        optimizer.step()
-        loss = loss.detach()
-
-        if current_step % configs['training']['report_every'] == 0:
+        if (current_step + 1) % configs['training']['report_every'] == 0:
             print('Batch: ', batch_index, flush = True)
-            print('Training loss: ', loss.item(), flush = True)
+            print('Training loss: ', loss.item() * configs['training']['gradient_acc_steps'], flush = True)
+            print('Learning rate: ', scheduled_optimizer.lr, flush = True)
 
-        if current_step % configs['training']['valid_every'] == 0:
+        if (current_step + 1) % configs['training']['valid_every'] == 0:
             model = model.eval()
             loss = 0
             for validation_batch_index, validation_batch in tqdm(enumerate(validation_loader), total = min(configs['training']['valid_length_limit'], len(validation_loader))):
@@ -162,7 +164,7 @@ for epoch_index in range(configs['training']['epoch']):
 
             model = model.train()
 
-        if current_step % configs['training']['save_every'] == 0:
+        if (current_step + 1) % configs['training']['save_every'] == 0:
             torch.save({
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
