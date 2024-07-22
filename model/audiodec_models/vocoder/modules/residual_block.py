@@ -17,7 +17,7 @@ import math
 
 import torch
 import torch.nn as nn
-from audiodec_models.conv_layer import CausalConv1d, Conv1d1x1   
+from model.audiodec_models.conv_layer import CausalConv1d, Conv1d1x1   
 
 
 class HiFiGANResidualBlock(nn.Module):

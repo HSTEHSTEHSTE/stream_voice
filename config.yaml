@@ -5,13 +5,12 @@ data:
   train_sets: ['train-clean-100', 'train-clean-360', 'train-other-500']
   dev_sets: ['dev-clean', 'dev-other']
   test_sets: ['test-clean', 'test-other']
-  debug_threshold: 100
 
 exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
-exp_name: base
+exp_name: tiny_lr1e-3
 
 device: cuda
-max_seq_len: 1000 # must be multiples of (frame_ratio + 1)
+max_seq_len: 1001 # must be multiples of (frame_ratio + 1) + 1
 batch_size: 16
 
 model:
@@ -27,13 +26,17 @@ model:
   frame_ratio: 4
 
 training:
-  epoch: 100
+  epoch: 100000
   report_every: 10
   valid_every: 1000
+  save_every: 1000
   mask_ratio: 0.02
   num_span: 10
   grad_clip_thresh: 1.0
+  valid_length_limit: 100
+  train_length_limit: 1
   optim:
     betas: [0.9, 0.98]
     eps: 1.0e-9
     weight_decay: 0.
+    lr: 1.0e-3

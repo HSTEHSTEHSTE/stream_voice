@@ -15,12 +15,12 @@
 import torch
 import logging
 
-from audiodec_models.conv_layer import CausalConv1d, CausalConvTranspose1d
-from audiodec_models.autoencoder.modules.encoder import Encoder, ActivateEncoder
-from audiodec_models.autoencoder.modules.decoder import Decoder, ActivateDecoder
-from audiodec_models.autoencoder.modules.projector import Projector
-from audiodec_models.autoencoder.modules.quantizer import Quantizer
-from audiodec_models.utils import check_mode
+from model.audiodec_models.conv_layer import CausalConv1d, CausalConvTranspose1d
+from model.audiodec_models.autoencoder.modules.encoder import Encoder, ActivateEncoder
+from model.audiodec_models.autoencoder.modules.decoder import Decoder, ActivateDecoder
+from model.audiodec_models.autoencoder.modules.projector import Projector
+from model.audiodec_models.autoencoder.modules.quantizer import Quantizer
+from model.audiodec_models.utils import check_mode
 
 
 ### GENERATOR ###

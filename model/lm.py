@@ -32,10 +32,9 @@ class RMSNorm(torch.nn.Module):
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+    t = torch.arange(end, device = freqs.device, dtype = torch.float32)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    freqs_cis.requires_grad = False
     return freqs_cis
 
 
@@ -81,6 +80,8 @@ class Attention(nn.Module):
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = configs['model']['transformer_dim'] // configs['model']['n_heads']
+        self.batch_size = configs['batch_size']
+        self.max_seq_len = configs['max_seq_len']
 
         self.wq = torch.nn.Linear(
             in_features = configs['model']['transformer_dim'],
@@ -103,23 +104,6 @@ class Attention(nn.Module):
             bias = False,
         )
 
-        self.cache_k = torch.zeros(
-            (
-                configs['batch_size'],
-                configs['max_seq_len'],
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-        self.cache_v = torch.zeros(
-            (
-                configs['batch_size'],
-                configs['max_seq_len'],
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-
     def forward(
         self,
         x: torch.Tensor,
@@ -134,18 +118,18 @@ class Attention(nn.Module):
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis = freqs_cis)
 
         keys = xk[:bsz, : start_pos + seqlen]
         values = xv[:bsz, : start_pos + seqlen]
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(
-            keys, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(
-            values, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        # # repeat k/v heads if n_kv_heads < n_heads
+        # keys = repeat_kv(
+        #     keys, self.n_rep
+        # )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        # values = repeat_kv(
+        #     values, self.n_rep
+        # )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
@@ -155,7 +139,7 @@ class Attention(nn.Module):
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        scores = F.softmax(scores.float(), dim = -1).type_as(xq)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
@@ -269,9 +253,12 @@ class StreamVoice(nn.Module):
     def forward(self, codecs, asr_embs):
         batch_size = codecs.shape[0]
         codec_embs = torch.sum(self.embeddings(codecs), dim = 2) # [batch_size, seq_len, transformer_dim]
-        codec_embs = codec_embs.view((codec_embs.shape[0], int(codec_embs.shape[1] / self.frame_ratio), self.frame_ratio, codec_embs.shape[2]))
+        codec_embs_final = codec_embs[:, -1, :]
+        codec_embs = codec_embs[:, :-1, :].view((codec_embs.shape[0], int(codec_embs.shape[1] / self.frame_ratio), self.frame_ratio, codec_embs.shape[2]))
         embs = torch.cat([asr_embs.unsqueeze(2), codec_embs], dim = 2)
         embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3]))
+        embs = torch.cat([embs, codec_embs_final.unsqueeze(1)], dim = 1)
+        # embs = torch.cat([codec_embs_final.unsqueeze(1), embs], dim = 1)
         embs = self.projection(embs)
         embs = embs[:, :self.max_seq_len, :]
         seq_len = embs.shape[1]

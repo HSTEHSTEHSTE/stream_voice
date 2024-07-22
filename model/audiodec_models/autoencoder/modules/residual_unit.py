@@ -14,8 +14,8 @@
 import torch
 import torch.nn as nn
 
-from audiodec_models.conv_layer import Conv1d1x1, NonCausalConv1d, CausalConv1d
-from audiodec_models.activation_function import get_activation
+from model.audiodec_models.conv_layer import Conv1d1x1, NonCausalConv1d, CausalConv1d
+from model.audiodec_models.activation_function import get_activation
 
 class NonCausalResidualUnit(nn.Module):
     def __init__(

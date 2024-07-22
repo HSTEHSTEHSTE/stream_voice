@@ -19,10 +19,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from audiodec_models.conv_layer import CausalConv1d, CausalConvTranspose1d
-from audiodec_models.vocoder.modules.multi_fusion import MultiReceptiveField, MultiGroupConv1d
-from audiodec_models.vocoder.modules.discriminator import HiFiGANMultiScaleDiscriminator
-from audiodec_models.vocoder.modules.discriminator import HiFiGANMultiPeriodDiscriminator
+from model.audiodec_models.conv_layer import CausalConv1d, CausalConvTranspose1d
+from model.audiodec_models.vocoder.modules.multi_fusion import MultiReceptiveField, MultiGroupConv1d
+from model.audiodec_models.vocoder.modules.discriminator import HiFiGANMultiScaleDiscriminator
+from model.audiodec_models.vocoder.modules.discriminator import HiFiGANMultiPeriodDiscriminator
 
 
 class Generator(nn.Module):
