@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 from dataset import Dataset
 from model.lm import StreamVoice
+from utils import get_checkpoints
 from optimizer import ScheduledOptim
 from tqdm import tqdm
 
@@ -68,11 +69,21 @@ scheduled_optimizer = ScheduledOptim(
     optimizer = optimizer, 
     d_model = configs['model']['transformer_dim'], 
     n_warmup_steps = configs['training']['n_warmup_step'], 
-    current_steps = max(configs['training']['restore_step'], 0),
+    current_steps = max(int((configs['training']['restore_step'] + 1) / configs['training']['gradient_acc_steps']), 0),
     init_lr = configs['training']['optim']['init_lr']
 )
 
+# Load checkpoint if possible
 current_step = 0
+checkpoints = get_checkpoints(checkpoint_path)
+if configs['training']['restore_step'] in checkpoints.keys():
+    checkpoint = torch.load(os.path.join(
+        checkpoint_path, 'checkpoint_{}.pt'.format(configs['training']['restore_step'])))
+    model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    print("\n---Model Restored at Step {}---\n".format(configs['training']['restore_step']))
+    current_step = configs['training']['restore_step']
+
 for epoch_index in range(configs['training']['epoch']):
     print('Entering epoch ', epoch_index, flush = True)
     for batch_index, batch in enumerate(loader):

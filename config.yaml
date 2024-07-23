@@ -35,7 +35,8 @@ training:
   grad_clip_thresh: 1.0
   valid_length_limit: 10
   train_length_limit: 1000000000
-  restore_step: -1
+  restore_step: 29999
+  keep_ckpts: 1
   n_warmup_step: 10000
   gradient_acc_steps: 2
   optim:
