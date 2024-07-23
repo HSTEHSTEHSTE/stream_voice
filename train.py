@@ -65,24 +65,31 @@ optimizer = torch.optim.Adam(
     eps = configs['training']['optim']['eps'], 
     weight_decay = configs['training']['optim']['weight_decay']
 )
-scheduled_optimizer = ScheduledOptim(
-    optimizer = optimizer, 
-    d_model = configs['model']['transformer_dim'], 
-    n_warmup_steps = configs['training']['n_warmup_step'], 
-    current_steps = max(int((configs['training']['restore_step'] + 1) / configs['training']['gradient_acc_steps']), 0),
-    init_lr = configs['training']['optim']['init_lr']
-)
 
 # Load checkpoint if possible
 current_step = 0
 checkpoints = get_checkpoints(checkpoint_path)
-if configs['training']['restore_step'] in checkpoints.keys():
+restore_checkpoint = -1
+if configs['training']['restore_step'] in checkpoints.keys() or configs['training']['restore_step'] == 'infer':
+    if configs['training']['restore_step'] in checkpoints.keys():
+        restore_checkpoint = configs['training']['restore_step']
+    if configs['training']['restore_step'] == 'infer':
+        restore_checkpoint = max(checkpoints.keys())
     checkpoint = torch.load(os.path.join(
-        checkpoint_path, 'checkpoint_{}.pt'.format(configs['training']['restore_step'])))
+        checkpoint_path, 'checkpoint_{}.pt'.format(restore_checkpoint)))
     model.load_state_dict(checkpoint['model'])
     optimizer.load_state_dict(checkpoint['optimizer'])
-    print("\n---Model Restored at Step {}---\n".format(configs['training']['restore_step']))
-    current_step = configs['training']['restore_step']
+    print("\n---Model Restored at Step {}---\n".format(restore_checkpoint))
+    current_step = restore_checkpoint
+
+# Define optimizer scheduler
+scheduled_optimizer = ScheduledOptim(
+    optimizer = optimizer, 
+    d_model = configs['model']['transformer_dim'], 
+    n_warmup_steps = configs['training']['n_warmup_step'], 
+    current_steps = (restore_checkpoint + 1) / configs['training']['gradient_acc_steps'],
+    init_lr = configs['training']['optim']['init_lr']
+)
 
 for epoch_index in range(configs['training']['epoch']):
     print('Entering epoch ', epoch_index, flush = True)
