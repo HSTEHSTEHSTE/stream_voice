@@ -3,7 +3,7 @@ from pathlib import Path
 import torch
 from dataset import Dataset
 from model.lm import StreamVoice
-from utils import get_checkpoints
+from utils import get_checkpoints, update_checkpoints
 from optimizer import ScheduledOptim
 from tqdm import tqdm
 
@@ -184,6 +184,9 @@ for epoch_index in range(configs['training']['epoch']):
                 'optimizer': optimizer.state_dict(),
                 }, 
                 os.path.join(checkpoint_path, 'checkpoint_{}.pt'.format(current_step)))
+            checkpoints[current_step] = 'checkpoint_{}.pt'.format(current_step)
+            update_checkpoints(checkpoint_path, checkpoints, configs['training']['keep_checkpoints'])
             print("save model at step {} ...".format(current_step), flush = True)
+            breakpoint()
 
         current_step += 1
