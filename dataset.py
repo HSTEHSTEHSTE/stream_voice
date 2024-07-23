@@ -76,7 +76,6 @@ class Dataset(Dataset):
             "asr_emb_pts": asr_emb_pts,
             "asr_emb_lens": torch.tensor(asr_emb_lens)
         }
-        # todo: test output
         return out
 
 

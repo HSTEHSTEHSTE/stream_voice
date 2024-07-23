@@ -119,6 +119,7 @@ for epoch_index in range(configs['training']['epoch']):
 
             scheduled_optimizer.step_and_update_lr()
             scheduled_optimizer.zero_grad()
+            loss = loss.detach()
 
         if (current_step + 1) % configs['training']['report_every'] == 0:
             print('Batch: ', batch_index, flush = True)
@@ -160,6 +161,8 @@ for epoch_index in range(configs['training']['epoch']):
                     codec_pt = torch.masked_select(codec_pt, mask)
                     output_codec = torch.masked_select(output[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
                     loss += cross_entropy_loss(output_codec, codec_pt.detach()).item()
+                del output
+                del output_codec
             print('Validation loss: ', loss / min(configs['training']['valid_length_limit'], len(validation_loader)), flush = True)
 
             model = model.train()
