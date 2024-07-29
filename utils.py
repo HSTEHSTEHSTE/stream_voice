@@ -14,3 +14,8 @@ def update_checkpoints(checkpoint_path, checkpoints, keep_checkpoints):
     for checkpoint_step in checkpoint_steps:
         os.remove(os.path.join(checkpoint_path, checkpoints[checkpoint_step]))
         checkpoints.pop(checkpoint_step)
+    return checkpoints
+
+def get_param_num(model):
+    num_param = sum(param.numel() for param in model.parameters())
+    return num_param

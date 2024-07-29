@@ -3,7 +3,7 @@ from pathlib import Path
 import torch
 from dataset import Dataset
 from model.lm import StreamVoice
-from utils import get_checkpoints, update_checkpoints
+from utils import get_checkpoints, update_checkpoints, get_param_num
 from optimizer import ScheduledOptim
 from tqdm import tqdm
 
@@ -53,7 +53,8 @@ validation_loader = torch.utils.data.DataLoader(dataset,
 print('Length of validation dataset: ', len(validation_dataset), flush = True)
 
 # Define model
-model = torch.nn.DataParallel(StreamVoice(configs)).to(device)
+model = torch.nn.DataParallel(StreamVoice(configs))
+print('Number of model parameters: ', get_param_num(model), flush = True)
 
 # Define loss
 cross_entropy_loss = torch.nn.CrossEntropyLoss()
@@ -70,7 +71,7 @@ optimizer = torch.optim.Adam(
 current_step = 0
 checkpoints = get_checkpoints(checkpoint_path)
 restore_checkpoint = -1
-if configs['training']['restore_step'] in checkpoints.keys() or configs['training']['restore_step'] == 'infer':
+if configs['training']['restore_step'] in checkpoints.keys() or (configs['training']['restore_step'] == 'infer' and len(checkpoints.keys()) > 0):
     if configs['training']['restore_step'] in checkpoints.keys():
         restore_checkpoint = configs['training']['restore_step']
     if configs['training']['restore_step'] == 'infer':
@@ -79,8 +80,10 @@ if configs['training']['restore_step'] in checkpoints.keys() or configs['trainin
         checkpoint_path, 'checkpoint_{}.pt'.format(restore_checkpoint)))
     model.load_state_dict(checkpoint['model'])
     optimizer.load_state_dict(checkpoint['optimizer'])
+    del checkpoint
     print("\n---Model Restored at Step {}---\n".format(restore_checkpoint))
     current_step = restore_checkpoint
+model = model.to(device)
 
 # Define optimizer scheduler
 scheduled_optimizer = ScheduledOptim(
@@ -112,7 +115,7 @@ for epoch_index in range(configs['training']['epoch']):
         ).to(device)
         in_codec_pts = torch.cat([codec_pts, codec_extra_pad.detach()], dim = 1).detach()
 
-        output = model(in_codec_pts, asr_emb_pts) # [batch_size, seq_len, codebook_dim, codebook_num]
+        output = model(in_codec_pts.detach(), asr_emb_pts.detach()) # [batch_size, seq_len, codebook_dim, codebook_num]
         output = output[:, :-1, :, :]
         output = output.view((output.shape[0], int(output.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, output.shape[2], output.shape[3]))
         output = output[:, :, :-1, :, :]
@@ -126,7 +129,7 @@ for epoch_index in range(configs['training']['epoch']):
             codec_pt = torch.masked_select(codec_pt, mask)
             output_codec = torch.masked_select(output[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
             loss = loss + cross_entropy_loss(output_codec, codec_pt.detach())
-        
+
         loss = loss / configs['training']['gradient_acc_steps']
         loss.backward()
         
@@ -192,8 +195,11 @@ for epoch_index in range(configs['training']['epoch']):
                 }, 
                 os.path.join(checkpoint_path, 'checkpoint_{}.pt'.format(current_step)))
             checkpoints[current_step] = 'checkpoint_{}.pt'.format(current_step)
-            update_checkpoints(checkpoint_path, checkpoints, configs['training']['keep_checkpoints'])
+            checkpoints = update_checkpoints(
+                checkpoint_path = checkpoint_path, 
+                checkpoints = checkpoints, 
+                keep_checkpoints = configs['training']['keep_checkpoints']
+            )
             print("save model at step {} ...".format(current_step), flush = True)
-            breakpoint()
 
         current_step += 1

@@ -2,16 +2,18 @@ data:
   base_path: /home/hltcoe/xli/ARTS/stream_voice/data
   codec_path: /home/hltcoe/xli/ARTS/stream_voice/data/LibriTTS_audiodec
   asr_path: /home/hltcoe/xli/ARTS/stream_voice/data/LibriTTS_icefall
-  train_sets: ['train-clean-100', 'train-clean-360', 'train-other-500']
+  # train_sets: ['train-clean-100', 'train-clean-360', 'train-other-500']
+  # train_sets: ['train-clean-100', 'train-clean-360']
+  train_sets: ['train-clean-100']
   dev_sets: ['dev-clean', 'dev-other']
   test_sets: ['test-clean', 'test-other']
 
 exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
-exp_name: b11_lr1e-6
+exp_name: b10_h2_l3_lr1_s
 
 device: cuda
 max_seq_len: 1001 # must be [multiples of (frame_ratio + 1)] + 1
-batch_size: 6
+batch_size: 16
 
 model:
   codebook_dim: 1024
@@ -19,7 +21,7 @@ model:
   n_layers: 8
   n_heads: 4
   emb_dim: 384
-  transformer_dim: 2048
+  transformer_dim: 1024
   norm_eps: 1.0e-5
   rope_theta: 500000
   multiple_of: 256
@@ -28,19 +30,19 @@ model:
 training:
   epoch: 100000
   report_every: 10
-  valid_every: 1000
+  valid_every: 2500
   save_every: 5000
   mask_ratio: 0.02
   num_span: 10
   grad_clip_thresh: 1.0
-  valid_length_limit: 10
+  valid_length_limit: 50
   train_length_limit: 1000000000
   restore_step: infer
-  keep_ckpts: 1
+  keep_checkpoints: 1
   n_warmup_step: 10000
-  gradient_acc_steps: 2
+  gradient_acc_steps: 1
   optim:
     betas: [0.9, 0.98]
     eps: 1.0e-9
     weight_decay: 0.
-    init_lr: 1.0e-6
+    init_lr: 1.0e-1
