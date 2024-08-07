@@ -9,7 +9,7 @@ data:
   test_sets: ['test-clean', 'test-other']
 
 exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
-exp_name: b10_h2_l3_lr1_s
+exp_name: b10_h2_l3_lr1_s_d5_fr1
 
 device: cuda
 max_seq_len: 1001 # must be [multiples of (frame_ratio + 1)] + 1
@@ -25,7 +25,7 @@ model:
   norm_eps: 1.0e-5
   rope_theta: 500000
   multiple_of: 256
-  frame_ratio: 4
+  frame_ratio: 1
 
 training:
   epoch: 100000
@@ -41,6 +41,7 @@ training:
   keep_checkpoints: 1
   n_warmup_step: 10000
   gradient_acc_steps: 1
+  input_dropout: 0.5
   optim:
     betas: [0.9, 0.98]
     eps: 1.0e-9
