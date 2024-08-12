@@ -150,6 +150,8 @@ for epoch_index in range(configs['training']['epoch']):
         if (current_step + 1) % configs['training']['valid_every'] == 0:
             model = model.eval()
             loss = 0
+            total = 0.
+            correct = 0.
             for validation_batch_index, validation_batch in tqdm(enumerate(validation_loader), total = min(configs['training']['valid_length_limit'], len(validation_loader))):
                 if validation_batch_index >= configs['training']['valid_length_limit']:
                     break
@@ -181,10 +183,13 @@ for epoch_index in range(configs['training']['epoch']):
                     mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
                     codec_pt = torch.masked_select(codec_pt, mask)
                     output_codec = torch.masked_select(output[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
+                    correct += torch.sum(torch.eq(torch.topk(output_codec, k = 10, dim = 1).indices, codec_pt.unsqueeze(1))).item()
+                    total += codec_pt.shape[0]
                     loss += cross_entropy_loss(output_codec, codec_pt.detach()).item()
                 del output
                 del output_codec
             print('Validation loss: ', loss / min(configs['training']['valid_length_limit'], len(validation_loader)), flush = True)
+            print('Validation top 10 accuracy: ', correct / total, flush = True)
 
             model = model.train()
 
