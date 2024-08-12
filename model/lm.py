@@ -220,7 +220,7 @@ class StreamVoice(nn.Module):
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings = self.codebook_num * self.codebook_dim + 1, 
-            embedding_dim = configs['model']['emb_dim'],
+            embedding_dim = configs['model']['transformer_dim'],
             padding_idx = self.codebook_num * self.codebook_dim
         )
 
@@ -258,11 +258,10 @@ class StreamVoice(nn.Module):
         codec_embs_final = codec_embs[:, -1, :]
         codec_embs = codec_embs[:, :-1, :].view((codec_embs.shape[0], int((codec_embs.shape[1] - 1) / self.frame_ratio), self.frame_ratio, codec_embs.shape[2]))
         codec_embs = self.input_dropout(codec_embs)
+        asr_embs = self.projection(asr_embs)
         embs = torch.cat([asr_embs.unsqueeze(2), codec_embs], dim = 2)
         embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3]))
         embs = torch.cat([embs, codec_embs_final.unsqueeze(1)], dim = 1)
-        # embs = torch.cat([codec_embs_final.unsqueeze(1), embs], dim = 1)
-        embs = self.projection(embs)
         embs = embs[:, :self.max_seq_len, :]
         seq_len = embs.shape[1]
         self.freqs_cis = self.freqs_cis.to(embs.device)
