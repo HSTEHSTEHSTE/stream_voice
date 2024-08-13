@@ -253,16 +253,27 @@ class StreamVoice(nn.Module):
         self.input_dropout = torch.nn.Dropout(p = configs['training']['input_dropout'])
 
     def forward(self, codecs, asr_embs):
+        # codecs: [batch_size, codec_seq_len]
+        # asr_embs: [batch_size, asr_seq_len, emb_dim]
+        # codec_seq_len = asr_seq_len * frame_ratio + 1
+
         batch_size = codecs.shape[0]
-        codec_embs = torch.sum(self.embeddings(codecs), dim = 2) # [batch_size, seq_len, transformer_dim]
-        codec_embs_final = codec_embs[:, -1, :]
-        codec_embs = codec_embs[:, :-1, :].view((codec_embs.shape[0], int((codec_embs.shape[1] - 1) / self.frame_ratio), self.frame_ratio, codec_embs.shape[2]))
-        codec_embs = self.input_dropout(codec_embs)
-        asr_embs = self.projection(asr_embs)
-        embs = torch.cat([asr_embs.unsqueeze(2), codec_embs], dim = 2)
-        embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3]))
-        embs = torch.cat([embs, codec_embs_final.unsqueeze(1)], dim = 1)
-        embs = embs[:, :self.max_seq_len, :]
+        codec_embs = torch.sum(self.embeddings(codecs), dim = 2) # [batch_size, codec_seq_len, transformer_dim]
+        
+        # Apply frame-level dropout
+        frame_dropout_ref = torch.full([codec_embs.shape[0], codec_embs.shape[1]], 1.).to(codecs.device)
+        frame_dropout_ref = self.input_dropout(frame_dropout_ref)
+        codec_embs = codec_embs * frame_dropout_ref.unsqueeze(-1)
+
+        codec_embs_final = codec_embs[:, -1, :] # extract the added last frame, so that seq_len is a multiple of frame_ratio
+        codec_embs = codec_embs[:, :-1, :].view((codec_embs.shape[0], int((codec_embs.shape[1] - 1) / self.frame_ratio), self.frame_ratio, codec_embs.shape[2])) # reshape so that there is a dimension of length = frame_ratio
+        # [batch_size, (codec_seq_len - 1)/frame_ratio, frame_ratio, transformer_dim]
+
+        asr_embs = self.projection(asr_embs) # [batch_size, asr_seq_len, transformer_dim]
+        embs = torch.cat([asr_embs.unsqueeze(2), codec_embs], dim = 2) # [batch_size, asr_seq_len, frame_ratio + 1, transformer_dim]
+        embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3])) # [batch_size, asr_seq_len * (frame_ratio + 1), transformer_dim]
+        embs = torch.cat([embs, codec_embs_final.unsqueeze(1)], dim = 1) # [batch_size, asr_seq_len * (frame_ratio + 1) + 1, transformer_dim]
+        embs = embs[:, :self.max_seq_len, :] # [batch_size, max_seq_len, transformer_dim]
         seq_len = embs.shape[1]
         self.freqs_cis = self.freqs_cis.to(embs.device)
         freqs_cis = self.freqs_cis[:min(seq_len, self.max_seq_len)]
