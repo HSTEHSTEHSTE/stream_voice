@@ -217,6 +217,7 @@ class StreamVoice(nn.Module):
         self.codebook_dim = configs['model']['codebook_dim']
         self.max_seq_len = configs['max_seq_len']
         self.frame_ratio = configs['model']['frame_ratio']
+        self.codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings = self.codebook_num * self.codebook_dim + 1, 
@@ -260,9 +261,10 @@ class StreamVoice(nn.Module):
         batch_size = codecs.shape[0]
         codec_embs = torch.sum(self.embeddings(codecs), dim = 2) # [batch_size, codec_seq_len, transformer_dim]
         
-        # Apply frame-level dropout
-        frame_dropout_ref = torch.full([codec_embs.shape[0], codec_embs.shape[1]], 1.).to(codecs.device)
+        # Apply frame-level dropout beyond the prompt
+        frame_dropout_ref = torch.full([codec_embs.shape[0], codec_embs.shape[1] - self.codec_prompt_len], 1.).to(codecs.device)
         frame_dropout_ref = self.input_dropout(frame_dropout_ref)
+        frame_dropout_ref = torch.cat([torch.full([codec_embs.shape[0], self.codec_prompt_len], 1.).to(codecs.device), frame_dropout_ref], dim = 1)
         codec_embs = codec_embs * frame_dropout_ref.unsqueeze(-1)
 
         codec_embs_final = codec_embs[:, -1, :] # extract the added last frame, so that seq_len is a multiple of frame_ratio
@@ -273,7 +275,8 @@ class StreamVoice(nn.Module):
         embs = torch.cat([asr_embs.unsqueeze(2), codec_embs], dim = 2) # [batch_size, asr_seq_len, frame_ratio + 1, transformer_dim]
         embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3])) # [batch_size, asr_seq_len * (frame_ratio + 1), transformer_dim]
         embs = torch.cat([embs, codec_embs_final.unsqueeze(1)], dim = 1) # [batch_size, asr_seq_len * (frame_ratio + 1) + 1, transformer_dim]
-        embs = embs[:, :self.max_seq_len, :] # [batch_size, max_seq_len, transformer_dim]
+        embs = embs[:, :self.max_seq_len, :] # [batch_size, seq_len, transformer_dim]
+        # seq_len = min(max_seq_len, asr_seq_len * (frame_ratio + 1) + 1)
         seq_len = embs.shape[1]
         self.freqs_cis = self.freqs_cis.to(embs.device)
         freqs_cis = self.freqs_cis[:min(seq_len, self.max_seq_len)]

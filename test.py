@@ -11,7 +11,6 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp-name', '-e', type = str, required = True)
 parser.add_argument('--restore-step', '-r', type = int, default = 0)
-parser.add_argument('--prompt_len', '-p', type = int, default = 100)
 
 args = parser.parse_args()
 
@@ -32,7 +31,7 @@ print('CUDA devices: ', os.environ["CUDA_VISIBLE_DEVICES"])
 device = torch.device(configs['device'])
 
 # Get dataset
-dataset = Dataset(configs, set_name = 'train')
+dataset = Dataset(configs, set_name = 'test')
 loader = torch.utils.data.DataLoader(
     dataset, 
     batch_size = 1, 
@@ -61,6 +60,8 @@ del checkpoint
 print("\n---Model Restored at Step {}---\n".format(args.restore_step))
 model = model.eval()
 
+prompt = torch.load('temp_1.pt').to(device)
+
 def advance_one_step(codec_prompt, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs):
     
     codec_prompt_ext = torch.cat([codec_prompt, codec_extension.detach()], dim = 1).detach()
@@ -80,16 +81,18 @@ def advance_one_step(codec_prompt, codec_extension, codec_extra_pad, model, asr_
     del output
     return codec_prompt, outputs, next_tokens
 
+codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
+
 for batch_index, batch in enumerate(loader):
     codec_pts = batch['codec_pts'].detach().to(device)
     asr_emb_pts = batch['asr_emb_pts'].detach().to(device)
 
-    codec_prompt_len = int(args.prompt_len / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
     if codec_pts.shape[1] > codec_prompt_len:
         outputs = []
         codec_prompt = codec_pts[:, :codec_prompt_len, :]
+        # codec_prompt = prompt
         codec_prompt_in = codec_pts[:, :codec_prompt_len, :]
-        asr_emb_prompt_len = int(args.prompt_len / (configs['model']['frame_ratio'] + 1))
+        asr_emb_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1))
         asr_emb_prompt = asr_emb_pts[:, :asr_emb_prompt_len, :]
         current_codec_pos = codec_prompt_len
         current_asr_emb_pos = asr_emb_prompt_len
@@ -106,8 +109,8 @@ for batch_index, batch in enumerate(loader):
                 _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs)
                 codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
                 current_codec_pos += 1
-                codec_prompt_in = codec_pts[:, :current_codec_pos, :]
-                # codec_prompt_in = codec_prompt
+                # codec_prompt_in = codec_pts[:, :current_codec_pos, :]
+                codec_prompt_in = codec_prompt
                 del codec_extension
             else:
                 if int(codec_prompt.shape[1] / configs['model']['frame_ratio']) == current_asr_emb_pos:
@@ -122,9 +125,9 @@ for batch_index, batch in enumerate(loader):
                     _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs)
                     codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
                     current_codec_pos += 1
-                    codec_prompt_in = codec_pts[:, :current_codec_pos, :]
-                    # codec_prompt_in = codec_prompt
-                    del codec_extension
+                    # codec_prompt_in = codec_pts[:, :current_codec_pos, :]
+                    codec_prompt_in = codec_prompt
+                    # del codec_extension
         del codec_extra_pad
     del asr_emb_pts
     loss = 0
@@ -138,6 +141,7 @@ for batch_index, batch in enumerate(loader):
         del codec_pt
     del outputs
     print(loss)
+    codec_prompt[:, :codec_prompt_len, :] = codec_pts[:, :codec_prompt_len, :]
     zq = audiodec.rx_encoder.lookup(torch.transpose(codec_prompt.squeeze(0), 0, 1))
     # zq = audiodec.rx_encoder.lookup(torch.transpose(codec_pts.squeeze(0), 0, 1))
     del codec_prompt
