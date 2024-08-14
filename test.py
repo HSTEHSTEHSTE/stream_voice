@@ -11,6 +11,8 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp-name', '-e', type = str, required = True)
 parser.add_argument('--restore-step', '-r', type = int, default = 0)
+parser.add_argument('--top-k', '-k', type = int, default = 1)
+parser.add_argument('--temperature', '-t', type = float, default = 0.)
 
 args = parser.parse_args()
 
@@ -62,6 +64,9 @@ model = model.eval()
 
 prompt = torch.load('temp_1.pt').to(device)
 
+if args.top_k > 1 and args.temperature > 0:
+    inference_sampler = torch.nn.Softmax(dim = 1)
+
 def advance_one_step(codec_prompt, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs):
     
     codec_prompt_ext = torch.cat([codec_prompt, codec_extension.detach()], dim = 1).detach()
@@ -74,7 +79,14 @@ def advance_one_step(codec_prompt, codec_extension, codec_extra_pad, model, asr_
     output = output[:, :, :-1, :, :]
     output = torch.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3], output.shape[4]))
     outputs.append(output[:, current_codec_pos, :, :].detach())
-    next_tokens = torch.argmax(output[:, current_codec_pos, :, :], dim = 1).unsqueeze(1)
+    if args.top_k == 1 or args.temperature == 0:
+        next_tokens = torch.argmax(output[:, current_codec_pos, :, :], dim = 1).unsqueeze(1)
+    else:
+        next_token_candidates = torch.topk(output[:, current_codec_pos, :, :], k = args.top_k, dim = 1)
+        next_token_probs = inference_sampler(torch.div(next_token_candidates.values, args.temperature))
+        next_token_candidate_indices = torch.multinomial(next_token_probs.squeeze(0).transpose(0, 1), 1).squeeze(1)
+        next_tokens = torch.diagonal(torch.index_select(next_token_candidates.indices, dim = 1, index = next_token_candidate_indices), dim1 = 1, dim2 = 2).unsqueeze(1)
+
     for codebook_num in range(configs['model']['codebook_num']):
         next_tokens[:, :, codebook_num] += codebook_num * configs['model']['codebook_dim']
     codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
