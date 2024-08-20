@@ -53,12 +53,14 @@ class Dataset(Dataset):
         codec_lens = []
         asr_emb_pts = []
         asr_emb_lens = []
+        paths = []
 
         for index in range(batch_len):
             codec_pts.append(torch.transpose(batch[index]['codec'], 1, 0)) # [length, 8]
             codec_lens.append(batch[index]['codec'].shape[1])
             asr_emb_pts.append(batch[index]['asr_emb'].squeeze(0)) # [length, 384]
             asr_emb_lens.append(batch[index]['asr_emb'].shape[1])
+            paths.append(batch[index]['path'])
         codec_pts = torch.nn.utils.rnn.pad_sequence(
             sequences = codec_pts,
             batch_first = True,
@@ -74,7 +76,8 @@ class Dataset(Dataset):
             "codec_pts": codec_pts,
             "codec_lens": torch.tensor(codec_lens),
             "asr_emb_pts": asr_emb_pts,
-            "asr_emb_lens": torch.tensor(asr_emb_lens)
+            "asr_emb_lens": torch.tensor(asr_emb_lens),
+            "paths": paths
         }
         return out
 

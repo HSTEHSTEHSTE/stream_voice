@@ -36,7 +36,7 @@ device = torch.device(configs['device'])
 dataset = Dataset(configs, set_name = 'test')
 loader = torch.utils.data.DataLoader(
     dataset, 
-    batch_size = 1, 
+    batch_size = 5, 
     shuffle = False,
     collate_fn = dataset.collate_fn, 
     drop_last = False, 
@@ -62,7 +62,7 @@ del checkpoint
 print("\n---Model Restored at Step {}---\n".format(args.restore_step))
 model = model.eval()
 
-prompt = torch.load('temp_1.pt').to(device)
+prompt = torch.load('temp.pt').to(device)
 
 if args.top_k > 1 and args.temperature > 0:
     inference_sampler = torch.nn.Softmax(dim = 1)
@@ -78,14 +78,21 @@ def advance_one_step(codec_prompt, codec_extension, codec_extra_pad, model, asr_
     output = output.view((output.shape[0], int(output.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, output.shape[2], output.shape[3]))
     output = output[:, :, :-1, :, :]
     output = torch.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3], output.shape[4]))
-    outputs.append(output[:, current_codec_pos, :, :].detach())
+    outputs.append(output[:, current_codec_pos, :, :].detach().to('cpu'))
     if args.top_k == 1 or args.temperature == 0:
         next_tokens = torch.argmax(output[:, current_codec_pos, :, :], dim = 1).unsqueeze(1)
     else:
         next_token_candidates = torch.topk(output[:, current_codec_pos, :, :], k = args.top_k, dim = 1)
         next_token_probs = inference_sampler(torch.div(next_token_candidates.values, args.temperature))
-        next_token_candidate_indices = torch.multinomial(next_token_probs.squeeze(0).transpose(0, 1), 1).squeeze(1)
-        next_tokens = torch.diagonal(torch.index_select(next_token_candidates.indices, dim = 1, index = next_token_candidate_indices), dim1 = 1, dim2 = 2).unsqueeze(1)
+        next_token_probs = next_token_probs.transpose(1, 2)
+        next_token_probs = next_token_probs.reshape(next_token_probs.shape[0] * next_token_probs.shape[1], next_token_probs.shape[2])
+        next_token_candidate_indices = torch.multinomial(next_token_probs, 1).squeeze(1)
+        next_token_candidates = next_token_candidates.indices
+        next_token_candidates = next_token_candidates.transpose(1, 2)
+        next_token_candidates = next_token_candidates.reshape(next_token_candidates.shape[0] * next_token_candidates.shape[1], next_token_candidates.shape[2])
+        next_tokens = torch.diagonal(torch.index_select(next_token_candidates, dim = 1, index = next_token_candidate_indices), dim1 = 0, dim2 = 1).view(output.shape[0], -1).unsqueeze(1)
+        del next_token_candidates
+        del next_token_probs
 
     for codebook_num in range(configs['model']['codebook_num']):
         next_tokens[:, :, codebook_num] += codebook_num * configs['model']['codebook_dim']
@@ -95,73 +102,93 @@ def advance_one_step(codec_prompt, codec_extension, codec_extra_pad, model, asr_
 
 codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
 
-for batch_index, batch in enumerate(loader):
-    codec_pts = batch['codec_pts'].detach().to(device)
-    asr_emb_pts = batch['asr_emb_pts'].detach().to(device)
+with torch.no_grad():
+    for batch_index, batch in enumerate(loader):
+        codec_pts = batch['codec_pts'].detach().to(device)
+        asr_emb_pts = batch['asr_emb_pts'].detach().to(device)
 
-    if codec_pts.shape[1] > codec_prompt_len:
-        outputs = []
-        codec_prompt = codec_pts[:, :codec_prompt_len, :]
-        # codec_prompt = prompt
-        codec_prompt_in = codec_pts[:, :codec_prompt_len, :]
-        asr_emb_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1))
-        asr_emb_prompt = asr_emb_pts[:, :asr_emb_prompt_len, :]
-        current_codec_pos = codec_prompt_len
-        current_asr_emb_pos = asr_emb_prompt_len
-        codec_extra_pad = torch.full(
-            size = (codec_pts.shape[0], 1, codec_pts.shape[2]), 
-            fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
-        ).to(device)
-        while current_codec_pos < codec_pts.shape[1] and current_codec_pos < int((configs['max_seq_len'] - 1) / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']):
-            if not codec_prompt.shape[1] % configs['model']['frame_ratio'] == 0:
-                codec_extension = torch.full(
-                    size = (codec_prompt.shape[0], configs['model']['frame_ratio'] - codec_prompt.shape[1] % configs['model']['frame_ratio'], codec_prompt.shape[2]), 
-                    fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
-                ).to(device)
-                _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs)
-                codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
-                current_codec_pos += 1
-                # codec_prompt_in = codec_pts[:, :current_codec_pos, :]
-                codec_prompt_in = codec_prompt
-                del codec_extension
-            else:
-                if int(codec_prompt.shape[1] / configs['model']['frame_ratio']) == current_asr_emb_pos:
-                    # next token is asr_emb, skip forward
-                    current_asr_emb_pos += 1
-                    asr_emb_prompt = asr_emb_pts[:, :current_asr_emb_pos, :]
-                else:
+        if codec_pts.shape[1] > codec_prompt_len:
+            outputs = []
+            codec_prompt = codec_pts[:, :codec_prompt_len, :]
+            # codec_prompt = prompt
+            codec_prompt_in = codec_pts[:, :codec_prompt_len, :]
+            asr_emb_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1))
+            asr_emb_prompt = asr_emb_pts[:, :asr_emb_prompt_len, :]
+            current_codec_pos = codec_prompt_len
+            current_asr_emb_pos = asr_emb_prompt_len
+            codec_extra_pad = torch.full(
+                size = (codec_pts.shape[0], 1, codec_pts.shape[2]), 
+                fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
+            ).to(device)
+            while current_codec_pos < codec_pts.shape[1] and current_codec_pos < int((configs['max_seq_len'] - 1) / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']):
+                if not codec_prompt.shape[1] % configs['model']['frame_ratio'] == 0:
                     codec_extension = torch.full(
-                        size = (codec_prompt.shape[0], configs['model']['frame_ratio'], codec_prompt.shape[2]), 
+                        size = (codec_prompt.shape[0], configs['model']['frame_ratio'] - codec_prompt.shape[1] % configs['model']['frame_ratio'], codec_prompt.shape[2]), 
                         fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
                     ).to(device)
                     _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs)
                     codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
+                    del next_tokens
+                    del codec_prompt_in
                     current_codec_pos += 1
                     # codec_prompt_in = codec_pts[:, :current_codec_pos, :]
                     codec_prompt_in = codec_prompt
-                    # del codec_extension
-        del codec_extra_pad
-    del asr_emb_pts
-    loss = 0
-    outputs = torch.stack(outputs, dim = 1)
-    for codebook_num in range(configs['model']['codebook_num']):
-        codec_pt = (codec_pts[:, codec_prompt_len:int((configs['max_seq_len'] - 1) / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), codebook_num] - configs['model']['codebook_dim'] * codebook_num)
-        # mask = torch.full(codec_pt.shape, True).to(device)
-        # outputs_current = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
-        # codec_pt = torch.masked_select(codec_pt, mask)
-        loss += cross_entropy_loss(torch.transpose(outputs[:, :, :, codebook_num], 1, 2), codec_pt[:, :].detach()).item()
-        del codec_pt
-    del outputs
-    print(loss)
-    codec_prompt[:, :codec_prompt_len, :] = codec_pts[:, :codec_prompt_len, :]
-    zq = audiodec.rx_encoder.lookup(torch.transpose(codec_prompt.squeeze(0), 0, 1))
-    # zq = audiodec.rx_encoder.lookup(torch.transpose(codec_pts.squeeze(0), 0, 1))
-    del codec_prompt
-    del codec_pts
-    y = audiodec.decoder.decode(zq)[:, :, :]
-    torchaudio.save('/home/hltcoe/xli/ARTS/stream_voice/test.wav', y.squeeze(0).to('cpu'), 24000)
-    del zq
-    del y
-    del batch
-    breakpoint()
+                    del codec_extension
+                else:
+                    if int(codec_prompt.shape[1] / configs['model']['frame_ratio']) == current_asr_emb_pos:
+                        # next token is asr_emb, skip forward
+                        current_asr_emb_pos += 1
+                        del asr_emb_prompt
+                        asr_emb_prompt = asr_emb_pts[:, :current_asr_emb_pos, :]
+                    else:
+                        codec_extension = torch.full(
+                            size = (codec_prompt.shape[0], configs['model']['frame_ratio'], codec_prompt.shape[2]), 
+                            fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
+                        ).to(device)
+                        _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs)
+                        codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
+                        del next_tokens
+                        del codec_prompt_in
+                        current_codec_pos += 1
+                        # codec_prompt_in = codec_pts[:, :current_codec_pos, :]
+                        codec_prompt_in = codec_prompt
+                        del codec_extension
+            del codec_extra_pad
+        del asr_emb_pts
+        loss = 0
+        total = 0.
+        correct = 0.
+        outputs = torch.stack(outputs, dim = 1).to(device)
+        for codebook_num in range(configs['model']['codebook_num']):
+            codec_pt = (codec_pts[:, codec_prompt_len:int((configs['max_seq_len'] - 1) / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), codebook_num] - configs['model']['codebook_dim'] * codebook_num)
+            
+            mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
+            codec_pt = torch.masked_select(codec_pt, mask)
+            output_codec = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
+            loss = loss + cross_entropy_loss(output_codec, codec_pt.detach()).item()
+            
+            # mask = torch.full(codec_pt.shape, True).to(device)
+            # outputs_current = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
+            # codec_pt = torch.masked_select(codec_pt, mask)
+            
+            # loss += cross_entropy_loss(torch.transpose(outputs[:, :, :, codebook_num], 1, 2), codec_pt[:, :].detach()).item()
+            correct += torch.sum(torch.eq(torch.topk(output_codec, k = 10, dim = 1).indices, codec_pt.unsqueeze(1))).item()
+            total += codec_pt.shape[0]
+            del codec_pt
+        del outputs
+        print(loss)
+        print('Test top 10 accuracy: ', correct / total, flush = True)
+        # codec_prompt[:, :codec_prompt_len, :] = codec_pts[:, :codec_prompt_len, :]
+        del codec_pts
+        
+        for i in range(codec_prompt.shape[0]):
+            zq = audiodec.rx_encoder.lookup(torch.transpose(codec_prompt[i, :min(codec_prompt.shape[1], batch['codec_lens'][i]), :], 0, 1))
+            # zq = audiodec.rx_encoder.lookup(torch.transpose(codec_pts.squeeze(0), 0, 1))
+            y = audiodec.decoder.decode(zq)[:, :, :]
+            torchaudio.save('/home/hltcoe/xli/ARTS/stream_voice/test.wav', y.squeeze(0).to('cpu'), 24000)
+            breakpoint()
+            del y
+            del zq
+        del codec_prompt
+        del batch
     

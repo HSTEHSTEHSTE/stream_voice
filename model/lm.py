@@ -251,7 +251,8 @@ class StreamVoice(nn.Module):
             theta = configs['model']['rope_theta'],
         )
 
-        self.input_dropout = torch.nn.Dropout(p = configs['training']['input_dropout'])
+        self.dropout_ratio = configs['training']['input_dropout']
+        self.input_dropout = torch.nn.Dropout(p = self.dropout_ratio)
 
     def forward(self, codecs, asr_embs):
         # codecs: [batch_size, codec_seq_len]
@@ -264,6 +265,8 @@ class StreamVoice(nn.Module):
         # Apply frame-level dropout beyond the prompt
         frame_dropout_ref = torch.full([codec_embs.shape[0], codec_embs.shape[1] - self.codec_prompt_len], 1.).to(codecs.device)
         frame_dropout_ref = self.input_dropout(frame_dropout_ref)
+        # if not self.training:
+        #     frame_dropout_ref = torch.div(frame_dropout_ref, 1 - self.dropout_ratio)
         frame_dropout_ref = torch.cat([torch.full([codec_embs.shape[0], self.codec_prompt_len], 1.).to(codecs.device), frame_dropout_ref], dim = 1)
         codec_embs = codec_embs * frame_dropout_ref.unsqueeze(-1)
 
@@ -273,6 +276,8 @@ class StreamVoice(nn.Module):
 
         asr_embs = self.projection(asr_embs) # [batch_size, asr_seq_len, transformer_dim]
         embs = torch.cat([asr_embs.unsqueeze(2), codec_embs], dim = 2) # [batch_size, asr_seq_len, frame_ratio + 1, transformer_dim]
+        del asr_embs
+        del codec_embs
         embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3])) # [batch_size, asr_seq_len * (frame_ratio + 1), transformer_dim]
         embs = torch.cat([embs, codec_embs_final.unsqueeze(1)], dim = 1) # [batch_size, asr_seq_len * (frame_ratio + 1) + 1, transformer_dim]
         embs = embs[:, :self.max_seq_len, :] # [batch_size, seq_len, transformer_dim]
@@ -300,4 +305,6 @@ class StreamVoice(nn.Module):
         embs = self.norm(embs)
         output = self.output(embs).float() # [batch_size, seq_len, codebook_num * codebook_dim]
         output = output.view((output.shape[0], output.shape[1], self.codebook_dim, self.codebook_num)) # [batch_size, seq_len, codebook_dim, codebook_num]
+        del embs
+        del mask
         return output
