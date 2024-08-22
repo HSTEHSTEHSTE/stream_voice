@@ -11,11 +11,11 @@ data:
   sampling_rate: 24000
 
 exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
-exp_name: b11_h2_l3_lr1_s_dt5_f
+exp_name: b10_h2_l3_lr1_c_dt5_p
 
 device: cuda
 max_seq_len: 1001 # must be [multiples of (frame_ratio + 1)] + 1
-batch_size: 7
+batch_size: 4
 
 model:
   codebook_dim: 1024
@@ -23,12 +23,32 @@ model:
   n_layers: 8
   n_heads: 4
   emb_dim: 384
-  transformer_dim: 2048
+  transformer_dim: 1024
   norm_eps: 1.0e-5
   rope_theta: 500000
   multiple_of: 256
   frame_ratio: 1
   prompt_len: 100
+
+hifigan:
+  resblock: 2
+
+  upsample_rates: [8, 8, 4]
+  upsample_kernel_sizes: [16, 16, 8]
+  upsample_initial_channel: 256
+  resblock_kernel_sizes: [3, 5, 7]
+  resblock_dilation_sizes: [[1, 2], [2, 6], [3, 12]]
+
+mel:
+  segment_size: 8192
+  num_mels: 80
+  num_freq: 1025
+  n_fft: 1024
+  hop_size: 256
+  win_size: 1024
+  fmin: 0
+  fmax: 8000
+  fmax_for_loss: null
 
 training:
   epoch: 100000
@@ -38,15 +58,19 @@ training:
   mask_ratio: 0.02
   num_span: 10
   grad_clip_thresh: 1.0
-  valid_length_limit: 50
+  valid_length_limit: 5
   train_length_limit: 1000000000
-  restore_step: infer
+  restore_step: 64999
   keep_checkpoints: 5
   n_warmup_step: 10000
   gradient_acc_steps: 3
   input_dropout: 0.5
+  random_seed: 0
+  top_k: 10
+  temperature: 1
   optim:
-    betas: [0.9, 0.98]
+    betas: [0.8, 0.99]
     eps: 1.0e-9
     weight_decay: 0.
-    init_lr: 1.0e-1
+    learning_rate: 0.0002
+    lr_decay: 0.999    

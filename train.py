@@ -80,7 +80,7 @@ if configs['training']['restore_step'] in checkpoints.keys() or (configs['traini
     checkpoint = torch.load(os.path.join(
         checkpoint_path, 'checkpoint_{}.pt'.format(restore_checkpoint)))
     model.load_state_dict(checkpoint['model'])
-    optimizer.load_state_dict(checkpoint['optimizer'])
+    # optimizer.load_state_dict(checkpoint['optimizer'])
     del checkpoint
     print("\n---Model Restored at Step {}---\n".format(restore_checkpoint))
     current_step = restore_checkpoint
