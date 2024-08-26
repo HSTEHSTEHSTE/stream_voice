@@ -11,7 +11,7 @@ data:
   sampling_rate: 24000
 
 exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
-exp_name: b10_h2_l3_lr1_c_dt5_p
+exp_name: b10_h2_l3_lr1_c_dt5_h
 
 device: cuda
 max_seq_len: 1001 # must be [multiples of (frame_ratio + 1)] + 1
@@ -53,8 +53,8 @@ mel:
 training:
   epoch: 100000
   report_every: 10
-  valid_every: 2500
-  save_every: 5000
+  valid_every: 500
+  save_every: 1000
   mask_ratio: 0.02
   num_span: 10
   grad_clip_thresh: 1.0
@@ -68,6 +68,7 @@ training:
   random_seed: 0
   top_k: 10
   temperature: 1
+  frame_limit: 40
   optim:
     betas: [0.8, 0.99]
     eps: 1.0e-9

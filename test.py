@@ -13,6 +13,9 @@ parser.add_argument('--exp-name', '-e', type = str, required = True)
 parser.add_argument('--restore-step', '-r', type = int, default = 0)
 parser.add_argument('--top-k', '-k', type = int, default = 1)
 parser.add_argument('--temperature', '-t', type = float, default = 0.)
+parser.add_argument('--dump_path', '-d', type = str, default = '')
+parser.add_argument('--dump_flat', '-f', type = int, default = 1)
+
 
 args = parser.parse_args()
 
@@ -36,7 +39,7 @@ device = torch.device(configs['device'])
 dataset = Dataset(configs, set_name = 'test')
 loader = torch.utils.data.DataLoader(
     dataset, 
-    batch_size = 5, 
+    batch_size = 256,
     shuffle = False,
     collate_fn = dataset.collate_fn, 
     drop_last = False, 
@@ -103,7 +106,7 @@ def advance_one_step(codec_prompt, codec_extension, codec_extra_pad, model, asr_
 codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
 
 with torch.no_grad():
-    for batch_index, batch in enumerate(loader):
+    for batch_index, batch in tqdm(enumerate(loader), total = len(loader)):
         codec_pts = batch['codec_pts'].detach().to(device)
         asr_emb_pts = batch['asr_emb_pts'].detach().to(device)
 
@@ -185,8 +188,22 @@ with torch.no_grad():
             zq = audiodec.rx_encoder.lookup(torch.transpose(codec_prompt[i, :min(codec_prompt.shape[1], batch['codec_lens'][i]), :], 0, 1))
             # zq = audiodec.rx_encoder.lookup(torch.transpose(codec_pts.squeeze(0), 0, 1))
             y = audiodec.decoder.decode(zq)[:, :, :]
-            torchaudio.save('/home/hltcoe/xli/ARTS/stream_voice/test.wav', y.squeeze(0).to('cpu'), 24000)
-            breakpoint()
+            if len(args.dump_path) == 0:
+                torchaudio.save(
+                    '/home/hltcoe/xli/ARTS/stream_voice/test.wav', 
+                    y.squeeze(0).to('cpu'), 
+                    configs['data']['sampling_rate']
+                )
+                breakpoint()
+            else:
+                if args.dump_flat == 0:
+                    target_path = os.path.join(args.dump_path, batch['paths'][i] + '.wav')
+                else:
+                    path_elements = batch['paths'][i].split('/')
+                    wav_name = path_elements[0] + '/' + path_elements[-1] + '.wav'
+                    target_path = os.path.join(args.dump_path, wav_name)
+                Path('/'.join(target_path.split('/')[:-1])).mkdir(parents = True, exist_ok = True)
+                torchaudio.save(target_path, y.squeeze(0).to('cpu'), configs['data']['sampling_rate'])
             del y
             del zq
         del codec_prompt

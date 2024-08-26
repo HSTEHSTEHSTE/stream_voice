@@ -190,6 +190,19 @@ def train(configs):
                 codec_pts = batch['codec_pts'].detach().to(device)
                 asr_emb_pts = batch['asr_emb_pts'].detach().to(device)
 
+                if torch.min(batch['codec_lens']) > configs['model']['prompt_len'] + configs['training']['frame_limit']:
+                    end_frame = torch.randint(
+                        low = configs['model']['prompt_len'] + configs['training']['frame_limit'],
+                        high = torch.min(batch['codec_lens']),
+                        size = []
+                    )
+                else:
+                    end_frame = configs['model']['prompt_len'] + configs['training']['frame_limit']
+
+                initial_frame = end_frame - (configs['model']['prompt_len'] + configs['training']['frame_limit'])
+                codec_pts = codec_pts[:, initial_frame:end_frame, :]
+                asr_emb_pts = asr_emb_pts[:, initial_frame:end_frame, :]
+
                 if codec_pts.shape[1] > codec_prompt_len:
                     codec_prompt = codec_pts[:, :codec_prompt_len, :]
                     # codec_prompt = prompt
@@ -467,7 +480,7 @@ def train(configs):
                     print('Steps : {:d}, Validation Mel-Spec. Error : {:4.3f}'.format
                     (
                         steps, 
-                        mel_error, 
+                        val_err, 
                     ), flush = True)
 
                 generator.train()
