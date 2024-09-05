@@ -124,7 +124,7 @@ for epoch_index in range(configs['training']['epoch']):
         # The model interleaves in_codec_pts with asr_emb_pts, resulting in seq_len = asr_seq_len + codec_seq_len + 1 = asr_seq_len * (frame_ratio + 1) + 1
         # The model then truncates the sequence according to max_seq_len
         # Therefore, seq_len = min(max_seq_len, asr_seq_len * (frame_ratio + 1) + 1)
-        output = model(in_codec_pts.detach(), asr_emb_pts.detach()) # [batch_size, seq_len, codebook_dim, codebook_num]
+        output, _ = model(in_codec_pts.detach(), asr_emb_pts.detach()) # [batch_size, seq_len, codebook_dim, codebook_num]
         
         # Remove the added last frame
         output = output[:, :-1, :, :] # [batch_size, seq_len - 1, codebook_dim, codebook_num]
@@ -141,7 +141,7 @@ for epoch_index in range(configs['training']['epoch']):
 
         # Compute loss per codebook
         loss = torch.tensor(0.).to(device)
-        for codebook_num in range(configs['model']['codebook_num']):
+        for codebook_num in configs['model']['codebook_ids']:
             codec_pt = codec_pts[:, :, codebook_num] - configs['model']['codebook_dim'] * codebook_num 
             mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
             codec_pt = torch.masked_select(codec_pt, mask)
@@ -165,52 +165,57 @@ for epoch_index in range(configs['training']['epoch']):
             print('Training loss: ', loss.item() * configs['training']['gradient_acc_steps'], flush = True)
             print('Learning rate: ', scheduled_optimizer.lr, flush = True)
 
-        if (current_step + 1) % configs['training']['valid_every'] == 0:
-            model = model.eval()
-            loss = 0
-            total = 0.
-            correct = 0.
-            for validation_batch_index, validation_batch in tqdm(enumerate(validation_loader), total = min(configs['training']['valid_length_limit'], len(validation_loader))):
-                if validation_batch_index >= configs['training']['valid_length_limit']:
-                    break
-                codec_pts = batch['codec_pts'].detach().to(device)
-                asr_emb_pts = batch['asr_emb_pts'].detach().to(device)
+        del loss
+        del output
+        del output_codec
 
-                if not codec_pts.shape[1] % configs['model']['frame_ratio'] == 0:
-                    codec_extension = torch.full(
-                        size = (codec_pts.shape[0], configs['model']['frame_ratio'] - codec_pts.shape[1] % configs['model']['frame_ratio'], codec_pts.shape[2]), 
+        if (current_step + 1) % configs['training']['valid_every'] == 0:
+            with torch.no_grad():
+                model = model.eval()
+                loss = 0
+                total = 0.
+                correct = 0.
+                for validation_batch_index, validation_batch in tqdm(enumerate(validation_loader), total = min(configs['training']['valid_length_limit'], len(validation_loader))):
+                    if validation_batch_index >= configs['training']['valid_length_limit']:
+                        break
+                    codec_pts = batch['codec_pts'].detach().to(device)
+                    asr_emb_pts = batch['asr_emb_pts'].detach().to(device)
+
+                    if not codec_pts.shape[1] % configs['model']['frame_ratio'] == 0:
+                        codec_extension = torch.full(
+                            size = (codec_pts.shape[0], configs['model']['frame_ratio'] - codec_pts.shape[1] % configs['model']['frame_ratio'], codec_pts.shape[2]), 
+                            fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
+                        ).to(device)
+                        codec_pts = torch.cat([codec_pts, codec_extension.detach()], dim = 1).detach()
+
+                    codec_extra_pad = torch.full(
+                        size = (codec_pts.shape[0], 1, codec_pts.shape[2]), 
                         fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
                     ).to(device)
-                    codec_pts = torch.cat([codec_pts, codec_extension.detach()], dim = 1).detach()
+                    in_codec_pts = torch.cat([codec_pts, codec_extra_pad.detach()], dim = 1).detach()
 
-                codec_extra_pad = torch.full(
-                    size = (codec_pts.shape[0], 1, codec_pts.shape[2]), 
-                    fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
-                ).to(device)
-                in_codec_pts = torch.cat([codec_pts, codec_extra_pad.detach()], dim = 1).detach()
+                    output, _ = model(in_codec_pts, asr_emb_pts) # [batch_size, seq_len, codebook_dim, codebook_num]
+                    output = output[:, :-1, :, :]
+                    output = output.view((output.shape[0], int(output.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, output.shape[2], output.shape[3]))
+                    output = output[:, :, :-1, :, :]
+                    output = torch.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3], output.shape[4]))
 
-                output = model(in_codec_pts, asr_emb_pts) # [batch_size, seq_len, codebook_dim, codebook_num]
-                output = output[:, :-1, :, :]
-                output = output.view((output.shape[0], int(output.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, output.shape[2], output.shape[3]))
-                output = output[:, :, :-1, :, :]
-                output = torch.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3], output.shape[4]))
+                    codec_pts = codec_pts[:, :int(configs['max_seq_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), :].detach()
+                    codec_pts = codec_pts[:, codec_prompt_len:, :]
+                    for codebook_num in configs['model']['codebook_ids']:
+                        codec_pt = codec_pts[:, :, codebook_num] - configs['model']['codebook_dim'] * codebook_num
+                        mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
+                        codec_pt = torch.masked_select(codec_pt, mask)
+                        output_codec = torch.masked_select(output[:, codec_prompt_len:, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
+                        correct += torch.sum(torch.eq(torch.topk(output_codec, k = 10, dim = 1).indices, codec_pt.unsqueeze(1))).item()
+                        total += codec_pt.shape[0]
+                        loss += cross_entropy_loss(output_codec, codec_pt.detach()).item()
+                    del output
+                    del output_codec
+                print('Validation loss: ', loss / min(configs['training']['valid_length_limit'], len(validation_loader)), flush = True)
+                print('Validation top 10 accuracy: ', correct / total, flush = True)
 
-                codec_pts = codec_pts[:, :int(configs['max_seq_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), :].detach()
-                codec_pts = codec_pts[:, codec_prompt_len:, :]
-                for codebook_num in range(configs['model']['codebook_num']):
-                    codec_pt = codec_pts[:, :, codebook_num] - configs['model']['codebook_dim'] * codebook_num
-                    mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
-                    codec_pt = torch.masked_select(codec_pt, mask)
-                    output_codec = torch.masked_select(output[:, codec_prompt_len:, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
-                    correct += torch.sum(torch.eq(torch.topk(output_codec, k = 10, dim = 1).indices, codec_pt.unsqueeze(1))).item()
-                    total += codec_pt.shape[0]
-                    loss += cross_entropy_loss(output_codec, codec_pt.detach()).item()
-                del output
-                del output_codec
-            print('Validation loss: ', loss / min(configs['training']['valid_length_limit'], len(validation_loader)), flush = True)
-            print('Validation top 10 accuracy: ', correct / total, flush = True)
-
-            model = model.train()
+                model = model.train()
 
         if (current_step + 1) % configs['training']['save_every'] == 0:
             torch.save({

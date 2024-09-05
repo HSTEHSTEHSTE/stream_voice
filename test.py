@@ -39,7 +39,7 @@ device = torch.device(configs['device'])
 dataset = Dataset(configs, set_name = 'test')
 loader = torch.utils.data.DataLoader(
     dataset, 
-    batch_size = 256,
+    batch_size = 4,
     shuffle = False,
     collate_fn = dataset.collate_fn, 
     drop_last = False, 
@@ -70,35 +70,37 @@ prompt = torch.load('temp.pt').to(device)
 if args.top_k > 1 and args.temperature > 0:
     inference_sampler = torch.nn.Softmax(dim = 1)
 
-def advance_one_step(codec_prompt, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs):
+def advance_one_step(
+    codec_prompt, 
+    codec_extension, 
+    codec_extra_pad, 
+    model, 
+    asr_emb_prompt, 
+    current_codec_pos, 
+    outputs, 
+    codec_pts
+):
     
     codec_prompt_ext = torch.cat([codec_prompt, codec_extension.detach()], dim = 1).detach()
     codec_prompt_ext = torch.cat([codec_prompt_ext, codec_extra_pad.detach()], dim = 1).detach()
 
-    output = model(codec_prompt_ext.detach(), asr_emb_prompt.detach())
+    output, next_tokens = model(codec_prompt_ext.detach(), asr_emb_prompt.detach())
     del codec_prompt_ext
     output = output[:, :-1, :, :]
     output = output.view((output.shape[0], int(output.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, output.shape[2], output.shape[3]))
     output = output[:, :, :-1, :, :]
     output = torch.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3], output.shape[4]))
     outputs.append(output[:, current_codec_pos, :, :].detach().to('cpu'))
-    if args.top_k == 1 or args.temperature == 0:
-        next_tokens = torch.argmax(output[:, current_codec_pos, :, :], dim = 1).unsqueeze(1)
-    else:
-        next_token_candidates = torch.topk(output[:, current_codec_pos, :, :], k = args.top_k, dim = 1)
-        next_token_probs = inference_sampler(torch.div(next_token_candidates.values, args.temperature))
-        next_token_probs = next_token_probs.transpose(1, 2)
-        next_token_probs = next_token_probs.reshape(next_token_probs.shape[0] * next_token_probs.shape[1], next_token_probs.shape[2])
-        next_token_candidate_indices = torch.multinomial(next_token_probs, 1).squeeze(1)
-        next_token_candidates = next_token_candidates.indices
-        next_token_candidates = next_token_candidates.transpose(1, 2)
-        next_token_candidates = next_token_candidates.reshape(next_token_candidates.shape[0] * next_token_candidates.shape[1], next_token_candidates.shape[2])
-        next_tokens = torch.diagonal(torch.index_select(next_token_candidates, dim = 1, index = next_token_candidate_indices), dim1 = 0, dim2 = 1).view(output.shape[0], -1).unsqueeze(1)
-        del next_token_candidates
-        del next_token_probs
+
+    next_tokens = next_tokens[:, :-1, :]
+    next_tokens = next_tokens.view((next_tokens.shape[0], int(next_tokens.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, next_tokens.shape[2]))
+    next_tokens = next_tokens[:, :, :-1, :]
+    next_tokens = torch.reshape(next_tokens, (next_tokens.shape[0], next_tokens.shape[1] * next_tokens.shape[2], next_tokens.shape[3]))
+    next_tokens = next_tokens[:, current_codec_pos, :].unsqueeze(1)
 
     for codebook_num in range(configs['model']['codebook_num']):
-        next_tokens[:, :, codebook_num] += codebook_num * configs['model']['codebook_dim']
+        if codebook_num not in configs['model']['codebook_ids']:
+            next_tokens[:, :, codebook_num] = codec_pts[:, current_codec_pos, codebook_num].unsqueeze(1)
     codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
     del output
     return codec_prompt, outputs, next_tokens
@@ -129,7 +131,7 @@ with torch.no_grad():
                         size = (codec_prompt.shape[0], configs['model']['frame_ratio'] - codec_prompt.shape[1] % configs['model']['frame_ratio'], codec_prompt.shape[2]), 
                         fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
                     ).to(device)
-                    _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs)
+                    _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs, codec_pts)
                     codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
                     del next_tokens
                     del codec_prompt_in
@@ -148,7 +150,7 @@ with torch.no_grad():
                             size = (codec_prompt.shape[0], configs['model']['frame_ratio'], codec_prompt.shape[2]), 
                             fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
                         ).to(device)
-                        _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs)
+                        _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs, codec_pts)
                         codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
                         del next_tokens
                         del codec_prompt_in
@@ -163,21 +165,22 @@ with torch.no_grad():
         correct = 0.
         outputs = torch.stack(outputs, dim = 1).to(device)
         for codebook_num in range(configs['model']['codebook_num']):
-            codec_pt = (codec_pts[:, codec_prompt_len:int((configs['max_seq_len'] - 1) / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), codebook_num] - configs['model']['codebook_dim'] * codebook_num)
-            
-            mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
-            codec_pt = torch.masked_select(codec_pt, mask)
-            output_codec = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
-            loss = loss + cross_entropy_loss(output_codec, codec_pt.detach()).item()
-            
-            # mask = torch.full(codec_pt.shape, True).to(device)
-            # outputs_current = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
-            # codec_pt = torch.masked_select(codec_pt, mask)
-            
-            # loss += cross_entropy_loss(torch.transpose(outputs[:, :, :, codebook_num], 1, 2), codec_pt[:, :].detach()).item()
-            correct += torch.sum(torch.eq(torch.topk(output_codec, k = 10, dim = 1).indices, codec_pt.unsqueeze(1))).item()
-            total += codec_pt.shape[0]
-            del codec_pt
+            if codebook_num in configs['model']['codebook_ids']:
+                codec_pt = (codec_pts[:, codec_prompt_len:int((configs['max_seq_len'] - 1) / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), codebook_num] - configs['model']['codebook_dim'] * codebook_num)
+                
+                mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
+                codec_pt = torch.masked_select(codec_pt, mask)
+                output_codec = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
+                loss = loss + cross_entropy_loss(output_codec, codec_pt.detach()).item()
+                
+                # mask = torch.full(codec_pt.shape, True).to(device)
+                # outputs_current = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
+                # codec_pt = torch.masked_select(codec_pt, mask)
+                
+                # loss += cross_entropy_loss(torch.transpose(outputs[:, :, :, codebook_num], 1, 2), codec_pt[:, :].detach()).item()
+                correct += torch.sum(torch.eq(torch.topk(output_codec, k = 10, dim = 1).indices, codec_pt.unsqueeze(1))).item()
+                total += codec_pt.shape[0]
+                del codec_pt
         del outputs
         print(loss)
         print('Test top 10 accuracy: ', correct / total, flush = True)

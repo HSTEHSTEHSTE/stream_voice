@@ -209,15 +209,54 @@ class TransformerBlock(nn.Module):
         return out
 
 
+class CodebookBlock(nn.Module):
+    def __init__(self, layer_id: int, configs):
+        super().__init__()
+        self.n_heads = configs['model']['codebook_layers']['n_heads']
+        self.dim = configs['model']['codebook_layers']['transformer_dim']
+        self.head_dim = configs['model']['codebook_layers']['transformer_dim'] // configs['model']['codebook_layers']['n_heads']
+        self.attention = Attention(configs)
+        self.feed_forward = FeedForward(
+            dim = configs['model']['codebook_layers']['transformer_dim'],
+            hidden_dim = 4 * configs['model']['codebook_layers']['transformer_dim'],
+            multiple_of = configs['model']['codebook_layers']['multiple_of'],
+            ffn_dim_multiplier = None,
+        )
+        self.layer_id = layer_id
+        self.attention_norm = RMSNorm(
+            dim = configs['model']['codebook_layers']['transformer_dim'], 
+            eps = configs['model']['codebook_layers']['norm_eps']
+        )
+        self.ffn_norm = RMSNorm(
+            dim = configs['model']['codebook_layers']['transformer_dim'], 
+            eps = configs['model']['codebook_layers']['norm_eps']
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        freqs_cis: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ):
+        h = x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return out
+
+
 class StreamVoice(nn.Module):
     def __init__(self, configs):
         super().__init__()
 
         self.codebook_num = configs['model']['codebook_num']
         self.codebook_dim = configs['model']['codebook_dim']
+        self.codebook_ids = configs['model']['codebook_ids']
         self.max_seq_len = configs['max_seq_len']
         self.frame_ratio = configs['model']['frame_ratio']
         self.codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
+        self.top_k = configs['training']['top_k']
+        self.temperature = configs['training']['temperature']
+        self.inference_sampler = torch.nn.Softmax(dim = 2)
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings = self.codebook_num * self.codebook_dim + 1, 
@@ -234,21 +273,34 @@ class StreamVoice(nn.Module):
         for layer_id in range(configs['model']['n_layers']):
             self.layers.append(TransformerBlock(layer_id, configs))
 
+        self.codebook_layers = torch.nn.ModuleList()
+        for layer_id in range(configs['model']['codebook_num']):
+            self.codebook_layers.append(TransformerBlock(layer_id, configs))
+
         self.norm = RMSNorm(
             dim = configs['model']['transformer_dim'], 
             eps = configs['model']['norm_eps']
         )
         
-        self.output = torch.nn.Linear(
-            in_features = configs['model']['transformer_dim'], 
-            out_features = self.codebook_dim * self.codebook_num, 
-            bias = False
+        self.output = torch.nn.ModuleList()
+        for codebook_id in range(configs['model']['codebook_num']):
+            self.output.append(torch.nn.Linear(
+                in_features = configs['model']['transformer_dim'], 
+                out_features = self.codebook_dim, 
+                bias = False
+            )
         )
 
         self.freqs_cis = precompute_freqs_cis(
             dim = configs['model']['transformer_dim'] // configs['model']['n_heads'],
             end = self.max_seq_len * 2,
             theta = configs['model']['rope_theta'],
+        )
+
+        self.codebook_freqs_cis = precompute_freqs_cis(
+            dim = configs['model']['codebook_layers']['transformer_dim'] // configs['model']['codebook_layers']['n_heads'],
+            end = self.max_seq_len * 2,
+            theta = configs['model']['codebook_layers']['rope_theta'],
         )
 
         self.dropout_ratio = configs['training']['input_dropout']
@@ -260,15 +312,26 @@ class StreamVoice(nn.Module):
         # codec_seq_len = asr_seq_len * frame_ratio + 1
 
         batch_size = codecs.shape[0]
-        codec_embs = torch.sum(self.embeddings(codecs), dim = 2) # [batch_size, codec_seq_len, transformer_dim]
+        codec_emb_codebooks = self.embeddings(codecs) # [batch_size, codec_seq_len, codebook_num, transformer_dim]
         
         # Apply frame-level dropout beyond the prompt
-        frame_dropout_ref = torch.full([codec_embs.shape[0], codec_embs.shape[1] - self.codec_prompt_len], 1.).to(codecs.device)
+        frame_dropout_ref = torch.full([codec_emb_codebooks.shape[0], codec_emb_codebooks.shape[1] - self.codec_prompt_len, codec_emb_codebooks.shape[2]], 1.).to(codecs.device)
         frame_dropout_ref = self.input_dropout(frame_dropout_ref)
         # if not self.training:
         #     frame_dropout_ref = torch.div(frame_dropout_ref, 1 - self.dropout_ratio)
-        frame_dropout_ref = torch.cat([torch.full([codec_embs.shape[0], self.codec_prompt_len], 1.).to(codecs.device), frame_dropout_ref], dim = 1)
-        codec_embs = codec_embs * frame_dropout_ref.unsqueeze(-1)
+        frame_dropout_ref = torch.cat([torch.full([codec_emb_codebooks.shape[0], self.codec_prompt_len, codec_emb_codebooks.shape[2]], 1.).to(codecs.device), frame_dropout_ref], dim = 1)
+        codec_emb_codebooks = codec_emb_codebooks * frame_dropout_ref.unsqueeze(-1)
+        
+        codec_embs = torch.sum(codec_emb_codebooks.clone(), dim = 2) # [batch_size, codec_seq_len, transformer_dim]
+        # codec_embs = torch.sum(self.embeddings(codecs[:, :, self.codebook_ids]), dim = 2) # [batch_size, codec_seq_len, transformer_dim]
+
+        filler_embs = torch.zeros([codec_emb_codebooks.shape[0], int((codec_emb_codebooks.shape[1] - 1) / self.frame_ratio), codec_emb_codebooks.shape[2], codec_emb_codebooks.shape[3]]).to(codecs.device)
+        codec_emb_codebooks_final = codec_emb_codebooks[:, -1, :, :]
+        codec_emb_codebooks = codec_emb_codebooks[:, :-1, :].view((codec_emb_codebooks.shape[0], int((codec_emb_codebooks.shape[1] - 1) / self.frame_ratio), self.frame_ratio, codec_emb_codebooks.shape[2], codec_emb_codebooks.shape[3]))
+        codebook_embs = torch.cat([filler_embs.unsqueeze(2), codec_emb_codebooks], dim = 2)
+        codebook_embs = codebook_embs.view((codebook_embs.shape[0], codebook_embs.shape[1] * codebook_embs.shape[2], codebook_embs.shape[3], codebook_embs.shape[4]))
+        codebook_embs = torch.cat([codebook_embs, codec_emb_codebooks_final.unsqueeze(1)], dim = 1)
+        codebook_embs = codebook_embs[:, :self.max_seq_len, :, :]
 
         codec_embs_final = codec_embs[:, -1, :] # extract the added last frame, so that seq_len is a multiple of frame_ratio
         codec_embs = codec_embs[:, :-1, :].view((codec_embs.shape[0], int((codec_embs.shape[1] - 1) / self.frame_ratio), self.frame_ratio, codec_embs.shape[2])) # reshape so that there is a dimension of length = frame_ratio
@@ -302,9 +365,43 @@ class StreamVoice(nn.Module):
 
         for layer in self.layers:
             embs = layer(embs, 0, freqs_cis, mask)
-        embs = self.norm(embs)
-        output = self.output(embs).float() # [batch_size, seq_len, codebook_num * codebook_dim]
-        output = output.view((output.shape[0], output.shape[1], self.codebook_dim, self.codebook_num)) # [batch_size, seq_len, codebook_dim, codebook_num]
+        outputs = []
+        next_token_codebooks = []
+        for codebook_index, codebook_layer in enumerate(self.codebook_layers):
+            embs = codebook_layer(embs, 0, freqs_cis, mask)
+            out_embs = self.norm(embs.clone())
+            output = self.output[codebook_index](out_embs).float() # [batch_size, seq_len, codebook_dim]
+            outputs.append(output)
+            if self.training:
+                embs[:, :-1, :] += codebook_embs[:, 1:, codebook_index, :]
+            else:
+                next_token_candidates = torch.topk(output, k = self.top_k, dim = 2)
+                next_token_probs = self.inference_sampler(torch.div(next_token_candidates.values, self.temperature))
+                next_token_probs = next_token_probs.reshape(next_token_probs.shape[0] * next_token_probs.shape[1], next_token_probs.shape[2])
+                next_token_candidate_indices = torch.multinomial(next_token_probs, 1).squeeze(1)
+                next_token_candidates = next_token_candidates.indices
+                next_token_candidates = next_token_candidates.reshape(next_token_candidates.shape[0] * next_token_candidates.shape[1], next_token_candidates.shape[2])
+                next_tokens = torch.diagonal(torch.index_select(next_token_candidates, dim = 1, index = next_token_candidate_indices), dim1 = 0, dim2 = 1).view(output.shape[0], -1)
+                
+                next_tokens += codebook_index * self.codebook_dim
+                
+                next_token_embs = self.embeddings(next_tokens)
+                embs += next_token_embs
+                next_token_codebooks.append(next_tokens)
+
+                del next_token_candidates
+                del next_token_probs
+                del next_token_candidate_indices
+                del next_token_embs
+
+        output = torch.stack(outputs, dim = -1) # [batch_size, seq_len, codebook_dim, codebook_num]
+        if self.training:
+            next_token_codebooks = None
+        else:
+            next_token_codebooks = torch.stack(next_token_codebooks, dim = 2)
         del embs
+        del codec_emb_codebooks
+        del codebook_embs
         del mask
-        return output
+        del outputs
+        return output, next_token_codebooks
