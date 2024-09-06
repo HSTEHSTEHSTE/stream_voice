@@ -95,6 +95,12 @@ scheduled_optimizer = ScheduledOptim(
     init_lr = configs['training']['optim']['init_lr']
 )
 
+loss_weights_total = 0.
+for codebook_index in range(configs['model']['codebook_num']):
+    if codebook_index in configs['model']['codebook_ids']:
+        loss_weights_total += configs['model']['codebook_weights'][codebook_index]
+loss_weights = [x / loss_weights_total for x in configs['model']['codebook_weights']]
+
 for epoch_index in range(configs['training']['epoch']):
     print('Entering epoch ', epoch_index, flush = True)
     for batch_index, batch in enumerate(loader):
@@ -146,7 +152,7 @@ for epoch_index in range(configs['training']['epoch']):
             mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
             codec_pt = torch.masked_select(codec_pt, mask)
             output_codec = torch.masked_select(output[:, codec_prompt_len:, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
-            loss = loss + cross_entropy_loss(output_codec, codec_pt.detach())
+            loss = loss + cross_entropy_loss(output_codec, codec_pt.detach()) * loss_weights[codebook_num]
 
         loss = loss / configs['training']['gradient_acc_steps']
         loss.backward()
@@ -173,6 +179,7 @@ for epoch_index in range(configs['training']['epoch']):
             with torch.no_grad():
                 model = model.eval()
                 loss = 0
+                losses = {}
                 total = 0.
                 correct = 0.
                 for validation_batch_index, validation_batch in tqdm(enumerate(validation_loader), total = min(configs['training']['valid_length_limit'], len(validation_loader))):
@@ -209,10 +216,18 @@ for epoch_index in range(configs['training']['epoch']):
                         output_codec = torch.masked_select(output[:, codec_prompt_len:, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
                         correct += torch.sum(torch.eq(torch.topk(output_codec, k = 10, dim = 1).indices, codec_pt.unsqueeze(1))).item()
                         total += codec_pt.shape[0]
-                        loss += cross_entropy_loss(output_codec, codec_pt.detach()).item()
+                        current_loss = cross_entropy_loss(output_codec, codec_pt.detach()).item()
+                        loss += current_loss * loss_weights[codebook_num]
+                        if codebook_num not in losses:
+                            losses[codebook_num] = current_loss
+                        else:
+                            losses[codebook_num] += current_loss
+
                     del output
                     del output_codec
                 print('Validation loss: ', loss / min(configs['training']['valid_length_limit'], len(validation_loader)), flush = True)
+                for codebook_index in configs['model']['codebook_ids']:
+                    print('Validation loss for codebook: ', codebook_index, " : ", losses[codebook_index] / min(configs['training']['valid_length_limit'], len(validation_loader)), flush = True)
                 print('Validation top 10 accuracy: ', correct / total, flush = True)
 
                 model = model.train()

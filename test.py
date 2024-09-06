@@ -107,6 +107,12 @@ def advance_one_step(
 
 codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
 
+loss_weights_total = 0.
+for codebook_index in range(configs['model']['codebook_num']):
+    if codebook_index in configs['model']['codebook_ids']:
+        loss_weights_total += configs['model']['codebook_weights'][codebook_index]
+loss_weights = [x / loss_weights_total for x in configs['model']['codebook_weights']]
+
 with torch.no_grad():
     for batch_index, batch in tqdm(enumerate(loader), total = len(loader)):
         codec_pts = batch['codec_pts'].detach().to(device)
@@ -161,6 +167,8 @@ with torch.no_grad():
             del codec_extra_pad
         del asr_emb_pts
         loss = 0
+        total_loss = 0
+        losses = {}
         total = 0.
         correct = 0.
         outputs = torch.stack(outputs, dim = 1).to(device)
@@ -171,7 +179,14 @@ with torch.no_grad():
                 mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
                 codec_pt = torch.masked_select(codec_pt, mask)
                 output_codec = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
-                loss = loss + cross_entropy_loss(output_codec, codec_pt.detach()).item()
+                
+                current_loss = cross_entropy_loss(output_codec, codec_pt.detach()).item()
+                loss += current_loss * loss_weights[codebook_num]
+                total_loss += current_loss
+                if codebook_num not in losses:
+                    losses[codebook_num] = current_loss
+                else:
+                    losses[codebook_num] += current_loss
                 
                 # mask = torch.full(codec_pt.shape, True).to(device)
                 # outputs_current = torch.masked_select(outputs[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
@@ -182,7 +197,10 @@ with torch.no_grad():
                 total += codec_pt.shape[0]
                 del codec_pt
         del outputs
-        print(loss)
+        print('Test weighted loss: ', loss)
+        print('Test total loss: ', total_loss)
+        for codebook_index in configs['model']['codebook_ids']:
+            print('Test loss for codebook: ', codebook_index, " : ", losses[codebook_index])
         print('Test top 10 accuracy: ', correct / total, flush = True)
         # codec_prompt[:, :codec_prompt_len, :] = codec_pts[:, :codec_prompt_len, :]
         del codec_pts
