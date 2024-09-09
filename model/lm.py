@@ -305,6 +305,7 @@ class StreamVoice(nn.Module):
 
         self.dropout_ratio = configs['training']['input_dropout']
         self.input_dropout = torch.nn.Dropout(p = self.dropout_ratio)
+        # self.input_dropout.train()
 
     def forward(self, codecs, asr_embs):
         # codecs: [batch_size, codec_seq_len]

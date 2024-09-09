@@ -5,6 +5,7 @@ from dataset import Dataset
 from model.lm import StreamVoice
 from tqdm import tqdm
 from model.audiodec import AudioDec, assign_model
+from utils import advance_one_step
 
 import argparse
 
@@ -70,41 +71,6 @@ prompt = torch.load('temp.pt').to(device)
 if args.top_k > 1 and args.temperature > 0:
     inference_sampler = torch.nn.Softmax(dim = 1)
 
-def advance_one_step(
-    codec_prompt, 
-    codec_extension, 
-    codec_extra_pad, 
-    model, 
-    asr_emb_prompt, 
-    current_codec_pos, 
-    outputs, 
-    codec_pts
-):
-    
-    codec_prompt_ext = torch.cat([codec_prompt, codec_extension.detach()], dim = 1).detach()
-    codec_prompt_ext = torch.cat([codec_prompt_ext, codec_extra_pad.detach()], dim = 1).detach()
-
-    output, next_tokens = model(codec_prompt_ext.detach(), asr_emb_prompt.detach())
-    del codec_prompt_ext
-    output = output[:, :-1, :, :]
-    output = output.view((output.shape[0], int(output.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, output.shape[2], output.shape[3]))
-    output = output[:, :, :-1, :, :]
-    output = torch.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3], output.shape[4]))
-    outputs.append(output[:, current_codec_pos, :, :].detach().to('cpu'))
-
-    next_tokens = next_tokens[:, :-1, :]
-    next_tokens = next_tokens.view((next_tokens.shape[0], int(next_tokens.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, next_tokens.shape[2]))
-    next_tokens = next_tokens[:, :, :-1, :]
-    next_tokens = torch.reshape(next_tokens, (next_tokens.shape[0], next_tokens.shape[1] * next_tokens.shape[2], next_tokens.shape[3]))
-    next_tokens = next_tokens[:, current_codec_pos, :].unsqueeze(1)
-
-    for codebook_num in range(configs['model']['codebook_num']):
-        if codebook_num not in configs['model']['codebook_ids']:
-            next_tokens[:, :, codebook_num] = codec_pts[:, current_codec_pos, codebook_num].unsqueeze(1)
-    codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
-    del output
-    return codec_prompt, outputs, next_tokens
-
 codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
 
 loss_weights_total = 0.
@@ -137,7 +103,7 @@ with torch.no_grad():
                         size = (codec_prompt.shape[0], configs['model']['frame_ratio'] - codec_prompt.shape[1] % configs['model']['frame_ratio'], codec_prompt.shape[2]), 
                         fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
                     ).to(device)
-                    _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs, codec_pts)
+                    _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs, codec_pts, configs)
                     codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
                     del next_tokens
                     del codec_prompt_in
@@ -156,7 +122,7 @@ with torch.no_grad():
                             size = (codec_prompt.shape[0], configs['model']['frame_ratio'], codec_prompt.shape[2]), 
                             fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
                         ).to(device)
-                        _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs, codec_pts)
+                        _, outputs, next_tokens = advance_one_step(codec_prompt_in, codec_extension, codec_extra_pad, model, asr_emb_prompt, current_codec_pos, outputs, codec_pts, configs)
                         codec_prompt = torch.cat([codec_prompt, next_tokens], dim = 1)
                         del next_tokens
                         del codec_prompt_in
