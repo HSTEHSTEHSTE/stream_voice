@@ -4,13 +4,15 @@ import os, math
 
 class Dataset(Dataset):
     def __init__(self, configs, sort = True, set_name = None):
-        assert set_name is None or set_name in ['train', 'dev', 'test']
+        assert set_name is None or set_name in ['train', 'dev', 'test', 'wildcard']
         if set_name is None or set_name == 'train':
             sets = configs['data']['train_sets']
         elif set_name == 'dev':
             sets = configs['data']['dev_sets']
         elif set_name == 'test':
             sets = configs['data']['test_sets']
+        elif set_name == 'wildcard':
+            sets = configs['data']['wildcard']
 
         self.max_seqlen = configs['max_seq_len']
         self.sort = sort
