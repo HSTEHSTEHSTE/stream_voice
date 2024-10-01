@@ -100,7 +100,10 @@ loss_weights_total = 0.
 for codebook_index in range(configs['model']['codebook_num']):
     if codebook_index in configs['model']['codebook_ids']:
         loss_weights_total += configs['model']['codebook_weights'][codebook_index]
+    else:
+        configs['model']['codebook_weights'][codebook_index] = 0
 loss_weights = [x / loss_weights_total for x in configs['model']['codebook_weights']]
+print(loss_weights)
 
 for epoch_index in range(configs['training']['epoch']):
     print('Entering epoch ', epoch_index, flush = True)

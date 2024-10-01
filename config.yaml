@@ -11,7 +11,7 @@ data:
   sampling_rate: 24000
 
 exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
-exp_name: b10_h2_l3_lr1_w2_d5
+exp_name: b10_h2_l3_lr2_d7_00_l1
 
 device: cuda
 max_seq_len: 1001 # must be [multiples of (frame_ratio + 1)] + 1
@@ -20,8 +20,8 @@ batch_size: 8
 model:
   codebook_dim: 1024
   codebook_num: 8
-  codebook_ids: [0, 1, 2, 3, 4, 5, 6, 7]
-  codebook_weights: [8.0, 8.0, 4.0, 4.0, 2.0, 2.0, 1.0, 1.0]
+  codebook_ids: [0]
+  codebook_weights: [64.0, 32.0, 16.0, 8.0, 4.0, 2.0, 1.0, 1.0]
   n_layers: 8
   n_heads: 4
   emb_dim: 384
@@ -53,11 +53,13 @@ training:
   keep_checkpoints: 10
   n_warmup_step: 10000
   gradient_acc_steps: 2
-  input_dropout: 0.5
+  input_dropout: 0.0
+  codec_dropout: 0.0
   top_k: 10
   temperature: 1
+  label_smoothing: 1
   optim:
     betas: [0.9, 0.98]
     eps: 1.0e-9
     weight_decay: 0.
-    init_lr: 1.0e-1
+    init_lr: 1.0e-2

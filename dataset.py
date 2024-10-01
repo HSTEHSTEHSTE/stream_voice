@@ -22,6 +22,9 @@ class Dataset(Dataset):
         self.codec_size = configs['model']['codebook_num'] * configs['model']['codebook_dim']
         self.frame_ratio = configs['model']['frame_ratio']
 
+        self.codebook_ids = configs['model']['codebook_ids']
+        self.codebook_dim = configs['model']['codebook_dim']
+
         self.items = {}
         self.item_indices = []
         for data_set in sets:
@@ -40,6 +43,10 @@ class Dataset(Dataset):
     def __getitem__(self, idx):
         item_meta = self.items[self.item_indices[idx]].copy()
         item_meta['codec'] = torch.load(os.path.join(self.codec_path, item_meta['path'] + '.pt'), map_location = 'cpu').detach()
+        if len(item_meta['codec'].shape) == 3:
+            item_meta['codec'] = item_meta['codec'].squeeze(1)
+            for codebook_num in self.codebook_ids:
+                item_meta['codec'][codebook_num] += self.codebook_dim * codebook_num
         item_meta['asr_emb'] = torch.load(os.path.join(self.asr_path, item_meta['path'] + '.pt'), map_location = 'cpu')[:, :-7, :]
         item_meta['asr_emb'] = torch.nn.functional.interpolate(
             input = torch.transpose(item_meta['asr_emb'], 1, 2),
