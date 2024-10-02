@@ -1,8 +1,8 @@
 data:
-  base_path: /home/arts/workspace/stream_voice/data
-  codec_path: /home/arts/workspace/stream_voice/data/LibriTTS_audiodec
-  asr_path: /home/arts/workspace/stream_voice/data/LibriTTS_icefall
-  wav_path: /home/arts/workspace/stream_voice/corpora/LibriTTS
+  base_path: /home/hltcoe/xli/ARTS/stream_voice/data
+  codec_path: /home/hltcoe/xli/ARTS/stream_voice/data/LibriTTS_audiodec
+  asr_path: /home/hltcoe/xli/ARTS/stream_voice/data/LibriTTS_icefall
+  wav_path: /home/hltcoe/xli/ARTS/stream_voice/corpora/LibriTTS
   train_sets: ['train-clean-100', 'train-clean-360', 'train-other-500']
   # train_sets: ['train-clean-100', 'train-clean-360']
   # train_sets: ['train-clean-100']
@@ -12,26 +12,27 @@ data:
   sampling_rate: 24000
 
 exp_path: /home/hltcoe/xli/ARTS/stream_voice/exp/exp
-exp_name: b10_h2_l3_lr2_d7_00_l1
+exp_name: b10_h2_l3_lr002_d7_l1
 
 device: cuda
 max_seq_len: 1001 # must be [multiples of (frame_ratio + 1)] + 1
-batch_size: 8
+batch_size: 7
 
 model:
   codebook_dim: 1024
   codebook_num: 8
-  codebook_ids: [0]
+  codebook_ids: [0, 1, 2, 3, 4, 5, 6, 7]
   codebook_weights: [64.0, 32.0, 16.0, 8.0, 4.0, 2.0, 1.0, 1.0]
   n_layers: 8
-  n_heads: 8
+  n_heads: 4
   emb_dim: 384
-  transformer_dim: 2048
+  transformer_dim: 1024
   norm_eps: 1.0e-5
   rope_theta: 500000
   multiple_of: 256
   frame_ratio: 1
-  prompt_len: 100
+  codec_prompt_len: 50
+  use_asr_prompt: false
   codebook_layers:
     n_layers: 2
     n_heads: 4
@@ -54,7 +55,7 @@ training:
   keep_checkpoints: 10
   n_warmup_step: 10000
   gradient_acc_steps: 2
-  input_dropout: 0.0
+  input_dropout: 0.7
   codec_dropout: 0.0
   top_k: 10
   temperature: 1
@@ -63,4 +64,4 @@ training:
     betas: [0.9, 0.98]
     eps: 1.0e-9
     weight_decay: 0.
-    init_lr: 1.0e-2
+    init_lr: 0.02

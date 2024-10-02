@@ -81,7 +81,8 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = configs['model']['transformer_dim'] // configs['model']['n_heads']
         self.batch_size = configs['batch_size']
-        self.max_seq_len = configs['max_seq_len']
+        self.codec_prompt_len = configs['model']['codec_prompt_len']
+        self.max_seq_len = configs['max_seq_len'] + self.codec_prompt_len
 
         self.wq = torch.nn.Linear(
             in_features = configs['model']['transformer_dim'],
@@ -251,9 +252,10 @@ class StreamVoice(nn.Module):
         self.codebook_num = configs['model']['codebook_num']
         self.codebook_dim = configs['model']['codebook_dim']
         self.codebook_ids = configs['model']['codebook_ids']
-        self.max_seq_len = configs['max_seq_len']
         self.frame_ratio = configs['model']['frame_ratio']
-        self.codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
+        self.codec_prompt_len = configs['model']['codec_prompt_len']
+        self.use_asr_prompt = configs['model']['use_asr_prompt']
+        self.max_seq_len = configs['max_seq_len'] + self.codec_prompt_len
         self.top_k = configs['training']['top_k']
         self.temperature = configs['training']['temperature']
         self.inference_sampler = torch.nn.Softmax(dim = 2)
@@ -326,11 +328,17 @@ class StreamVoice(nn.Module):
         codec_embs = torch.sum(codec_emb_codebooks.clone(), dim = 2) # [batch_size, codec_seq_len, transformer_dim]
         # codec_embs = torch.sum(self.embeddings(codecs[:, :, self.codebook_ids]), dim = 2) # [batch_size, codec_seq_len, transformer_dim]
 
-        filler_embs = torch.zeros([codec_emb_codebooks.shape[0], int((codec_emb_codebooks.shape[1] - 1) / self.frame_ratio), codec_emb_codebooks.shape[2], codec_emb_codebooks.shape[3]]).to(codecs.device)
         codec_emb_codebooks_final = codec_emb_codebooks[:, -1, :, :]
+        if not self.use_asr_prompt:
+            codec_emb_prompt = codec_emb_codebooks[:, :self.codec_prompt_len, :]
+            codec_emb_codebooks = codec_emb_codebooks[:, self.codec_prompt_len:, :]
+        filler_embs = torch.zeros([codec_emb_codebooks.shape[0], int((codec_emb_codebooks.shape[1] - 1) / self.frame_ratio), codec_emb_codebooks.shape[2], codec_emb_codebooks.shape[3]]).to(codecs.device)
         codec_emb_codebooks = codec_emb_codebooks[:, :-1, :].view((codec_emb_codebooks.shape[0], int((codec_emb_codebooks.shape[1] - 1) / self.frame_ratio), self.frame_ratio, codec_emb_codebooks.shape[2], codec_emb_codebooks.shape[3]))
         codebook_embs = torch.cat([filler_embs.unsqueeze(2), codec_emb_codebooks], dim = 2)
         codebook_embs = codebook_embs.view((codebook_embs.shape[0], codebook_embs.shape[1] * codebook_embs.shape[2], codebook_embs.shape[3], codebook_embs.shape[4]))
+        if not self.use_asr_prompt:
+            codebook_embs = torch.cat([codec_emb_prompt, codebook_embs], dim = 1)
+            del codec_emb_prompt
         codebook_embs = torch.cat([codebook_embs, codec_emb_codebooks_final.unsqueeze(1)], dim = 1)
         codebook_embs = codebook_embs[:, :self.max_seq_len, :, :]
 
@@ -339,10 +347,14 @@ class StreamVoice(nn.Module):
         # [batch_size, (codec_seq_len - 1)/frame_ratio, frame_ratio, transformer_dim]
 
         asr_embs = self.projection(asr_embs) # [batch_size, asr_seq_len, transformer_dim]
-        embs = torch.cat([asr_embs.unsqueeze(2), codec_embs], dim = 2) # [batch_size, asr_seq_len, frame_ratio + 1, transformer_dim]
+        if not self.use_asr_prompt:
+            embs = torch.cat([asr_embs.unsqueeze(2), codec_embs[:, int(self.codec_prompt_len / self.frame_ratio):, :]], dim = 2) # [batch_size, asr_seq_len, frame_ratio + 1, transformer_dim]
         del asr_embs
-        del codec_embs
         embs = embs.view((embs.shape[0], embs.shape[1] * embs.shape[2], embs.shape[3])) # [batch_size, asr_seq_len * (frame_ratio + 1), transformer_dim]
+        codec_embs = codec_embs.view((codec_embs.shape[0], codec_embs.shape[1] * codec_embs.shape[2], codec_embs.shape[3]))
+        if not self.use_asr_prompt:
+            embs = torch.cat([codec_embs[:, :int(self.codec_prompt_len / self.frame_ratio), :], embs], dim = 1)
+        del codec_embs
         embs = torch.cat([embs, codec_embs_final.unsqueeze(1)], dim = 1) # [batch_size, asr_seq_len * (frame_ratio + 1) + 1, transformer_dim]
         embs = embs[:, :self.max_seq_len, :] # [batch_size, seq_len, transformer_dim]
         # seq_len = min(max_seq_len, asr_seq_len * (frame_ratio + 1) + 1)

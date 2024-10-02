@@ -56,7 +56,11 @@ print('Length of validation dataset: ', len(validation_dataset), flush = True)
 # Define model
 model = torch.nn.DataParallel(StreamVoice(configs))
 print('Number of model parameters: ', get_param_num(model), flush = True)
-codec_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio'])
+codec_prompt_len = configs['model']['codec_prompt_len']
+if configs['model']['use_asr_prompt']:
+    asr_emb_prompt_len = int(codec_prompt_len / configs['model']['frame_ratio'])
+else:
+    asr_emb_prompt_len = 0
 
 # Define loss
 cross_entropy_loss = torch.nn.CrossEntropyLoss()
@@ -124,12 +128,26 @@ for epoch_index in range(configs['training']['epoch']):
             codec_pts = torch.cat([codec_pts, codec_extension.detach()], dim = 1).detach()
         # [batch_size, codec_seq_len, codebook_num]
 
+        # Pick prompt
+        if not configs['model']['use_asr_prompt']:
+            if torch.min(batch['codec_lens']) > codec_prompt_len:
+                codec_prompt_start = torch.randint(low = 0, high = torch.min(batch['codec_lens']) - codec_prompt_len, size = [1])
+            else:
+                codec_prompt_start = 0
+            codec_prompt = codec_pts[:, codec_prompt_start:codec_prompt_start + codec_prompt_len, :]
+        else:
+            codec_prompt = codec_pts[:, :codec_prompt_len, :]
+            asr_prompt = asr_emb_pts[:, :asr_emb_prompt_len, :]
+            codec_pts = codec_pts[:, codec_prompt_len:, :]
+            asr_emb_pts = asr_emb_pts[:, asr_emb_prompt_len:, :]
+
         # Add an extra token to the sequence
         codec_extra_pad = torch.full(
             size = (codec_pts.shape[0], 1, codec_pts.shape[2]), 
             fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
         ).to(device)
         in_codec_pts = torch.cat([codec_pts, codec_extra_pad.detach()], dim = 1).detach() # [batch_size, codec_seq_len + 1, codebook_num]
+        in_codec_pts = torch.cat([codec_prompt, in_codec_pts], dim = 1).detach()
 
         # The model interleaves in_codec_pts with asr_emb_pts, resulting in seq_len = asr_seq_len + codec_seq_len + 1 = asr_seq_len * (frame_ratio + 1) + 1
         # The model then truncates the sequence according to max_seq_len
@@ -137,7 +155,7 @@ for epoch_index in range(configs['training']['epoch']):
         output, _ = model(in_codec_pts.detach(), asr_emb_pts.detach()) # [batch_size, seq_len, codebook_dim, codebook_num]
         
         # Remove the added last frame
-        output = output[:, :-1, :, :] # [batch_size, seq_len - 1, codebook_dim, codebook_num]
+        output = output[:, codec_prompt_len:-1, :, :] # [batch_size, seq_len - 1, codebook_dim, codebook_num]
         
         ## Remove the interleaved frames (that correspond to asr_embs) from the output
         output = output.view((output.shape[0], int(output.shape[1] / (configs['model']['frame_ratio'] + 1)), configs['model']['frame_ratio'] + 1, output.shape[2], output.shape[3])) # [batch_size, (seq_len - 1) / (frame_ratio + 1), frame_ratio + 1, codebook_dim, codebook_num]
@@ -147,7 +165,7 @@ for epoch_index in range(configs['training']['epoch']):
         ## Compute Loss
         # Prepare training target
         codec_pts = codec_pts[:, :int(configs['max_seq_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), :].detach() # [batch_size, (seq_len - 1) / (frame_ratio + 1) * frame_ratio, codebook_num]
-        codec_pts = codec_pts[:, codec_prompt_len:, :] # [batch_size, (seq_len - 1) / (frame_ratio + 1) * frame_ratio - codec_prompt_len, codebook_num]
+        codec_pts = codec_pts[:, :, :] # [batch_size, (seq_len - 1) / (frame_ratio + 1) * frame_ratio - codec_prompt_len, codebook_num]
 
         # Compute loss per codebook
         loss = torch.tensor(0.).to(device)
@@ -155,7 +173,7 @@ for epoch_index in range(configs['training']['epoch']):
             codec_pt = codec_pts[:, :, codebook_num] - configs['model']['codebook_dim'] * codebook_num 
             mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
             codec_pt = torch.masked_select(codec_pt, mask)
-            output_codec = torch.masked_select(output[:, codec_prompt_len:, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
+            output_codec = torch.masked_select(output[:, :, :, codebook_num], mask.unsqueeze(2)).view((-1, configs['model']['codebook_dim']))
             loss = loss + cross_entropy_loss(output_codec, codec_pt.detach()) * loss_weights[codebook_num]
 
         loss = loss / configs['training']['gradient_acc_steps']
@@ -193,12 +211,17 @@ for epoch_index in range(configs['training']['epoch']):
                     codec_pts = validation_batch['codec_pts'].detach().to(device)
                     asr_emb_pts = validation_batch['asr_emb_pts'].detach().to(device)
 
+                    # Pick prompt
+                    if torch.min(batch['codec_lens']) > codec_prompt_len:
+                        codec_prompt_start = torch.randint(low = 0, high = torch.min(validation_batch['codec_lens']) - codec_prompt_len, size = [1])
+                    else:
+                        codec_prompt_start = 0
+                    codec_prompt = codec_pts[:, codec_prompt_start:codec_prompt_start + codec_prompt_len, :]
+
                     if codec_pts.shape[1] > codec_prompt_len:
                         outputs = []
-                        codec_prompt = codec_pts[:, :codec_prompt_len, :]
                         # codec_prompt = prompt
-                        codec_prompt_in = codec_pts[:, :codec_prompt_len, :]
-                        asr_emb_prompt_len = int(configs['model']['prompt_len'] / (configs['model']['frame_ratio'] + 1))
+                        codec_prompt_in = codec_prompt
                         asr_emb_prompt = asr_emb_pts[:, :asr_emb_prompt_len, :]
                         current_codec_pos = codec_prompt_len
                         current_asr_emb_pos = asr_emb_prompt_len
@@ -206,7 +229,7 @@ for epoch_index in range(configs['training']['epoch']):
                             size = (codec_pts.shape[0], 1, codec_pts.shape[2]), 
                             fill_value = configs['model']['codebook_num'] * configs['model']['codebook_dim']
                         ).to(device)
-                        while current_codec_pos < codec_pts.shape[1] and current_codec_pos < int((configs['max_seq_len'] - 1) / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']):
+                        while current_codec_pos < codec_pts.shape[1] and current_codec_pos < int((configs['max_seq_len'] - 1) / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']) + codec_prompt_len:
                             if not codec_prompt.shape[1] % configs['model']['frame_ratio'] == 0:
                                 codec_extension = torch.full(
                                     size = (codec_prompt.shape[0], configs['model']['frame_ratio'] - codec_prompt.shape[1] % configs['model']['frame_ratio'], codec_prompt.shape[2]), 
@@ -221,7 +244,7 @@ for epoch_index in range(configs['training']['epoch']):
                                 codec_prompt_in = codec_prompt
                                 del codec_extension
                             else:
-                                if int(codec_prompt.shape[1] / configs['model']['frame_ratio']) == current_asr_emb_pos:
+                                if int(codec_prompt.shape[1] / configs['model']['frame_ratio']) == current_asr_emb_pos + codec_prompt_len:
                                     # next token is asr_emb, skip forward
                                     current_asr_emb_pos += 1
                                     del asr_emb_prompt
@@ -243,7 +266,6 @@ for epoch_index in range(configs['training']['epoch']):
 
                     output = torch.stack(outputs, dim = 1).to(device)
                     codec_pts = codec_pts[:, :int(configs['max_seq_len'] / (configs['model']['frame_ratio'] + 1) * configs['model']['frame_ratio']), :].detach()
-                    codec_pts = codec_pts[:, codec_prompt_len:, :]
                     for codebook_num in configs['model']['codebook_ids']:
                         codec_pt = codec_pts[:, :, codebook_num] - configs['model']['codebook_dim'] * codebook_num
                         mask = codec_pt != dataset.codec_size - configs['model']['codebook_dim'] * codebook_num
